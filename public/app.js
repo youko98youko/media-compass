@@ -27,9 +27,9 @@ const state = {
   newHearing: { history: [], question: null, questionNumber: 0, maxQuestions: 4, done: false, loading: false },
   direction: null,
   gscConnected: false,
-  wantWordpress: false,
   wordpressConnected: false,
-  wpConnectContext: null, // 'existing' | 'new'
+  wordpressSiteUrl: '',
+  wpConnectContext: null, // 'publish' | 'settings'
 };
 
 const STEPS = ['テーマ選定', '一次情報', 'AIヒアリング', '記事構成・生成', '装飾・確認', '公開'];
@@ -147,6 +147,7 @@ function shell(innerHtml, { active = true, nav = true } = {}) {
         <span class="${state.screen === 'dashboard' ? 'on' : ''}" data-nav="dashboard">ホーム</span>
         <span class="${state.screen === 'direction' ? 'on' : ''}" data-nav="direction">メディアの方向性</span>
         <span data-nav="monitoring">記事一覧・監視</span>
+        <span class="${state.screen === 'settings' ? 'on' : ''}" data-nav="settings">設定</span>
       </div>` : '';
   app.innerHTML = `
     <div class="appbar">
@@ -162,6 +163,7 @@ function shell(innerHtml, { active = true, nav = true } = {}) {
       if (elm.dataset.nav === 'dashboard') renderDashboard();
       if (elm.dataset.nav === 'monitoring') renderMonitoring();
       if (elm.dataset.nav === 'direction') renderDirectionSummary();
+      if (elm.dataset.nav === 'settings') renderSettings();
     });
   });
 }
@@ -206,9 +208,6 @@ async function pickMediaState(mediaState) {
   state.mediaState = mediaState;
   state.siteUrlInput = '';
   state.gscConnected = false;
-  state.wantWordpress = false;
-  state.wordpressConnected = false;
-  state.wpConnectContext = null;
   if (mediaState === 'existing') renderExistingUnderstand();
   else renderNewBusinessForm();
 }
@@ -229,10 +228,7 @@ function renderExistingUnderstand() {
         <div class="field-grid">
           <div class="k">サイトURL</div><div class="v"><input id="site-url" type="text" placeholder="https://example.co.jp" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;"></div>
         </div>
-        <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ink);cursor:pointer;margin:12px 0 4px;">
-          <input type="checkbox" id="wp-connect-check"> WordPressと接続する（記事のタイトル・見出し構成まで取得できます）
-        </label>
-        <div style="font-size:11px;color:var(--sub);margin:6px 0 12px;">未定：既存記事一覧の取得手段（GSC連携／簡易クロール／手動アップロード／CMS連携のいずれを主手段とするか）。本デモでは、これらを組み合わせて体験できます。</div>
+        <div style="font-size:11px;color:var(--sub);margin:6px 0 12px;">未定：既存記事一覧の取得手段（GSC連携／簡易クロール／手動アップロード／CMS連携のいずれを主手段とするか）</div>
         <div class="btn-row">
           <button class="btn navy" id="go-analyze-gsc">GSCと連携して分析する →</button>
           <button class="btn outline" id="go-analyze-nogsc">GSCと連携しないで分析する →</button>
@@ -242,17 +238,12 @@ function renderExistingUnderstand() {
   `, { active: false, nav: false });
   document.getElementById('go-analyze-gsc').addEventListener('click', () => {
     state.siteUrlInput = (document.getElementById('site-url').value || '').trim() || 'https://example.co.jp';
-    state.wantWordpress = document.getElementById('wp-connect-check').checked;
-    state.wpConnectContext = 'existing';
     renderGscConnect();
   });
   document.getElementById('go-analyze-nogsc').addEventListener('click', () => {
     state.siteUrlInput = (document.getElementById('site-url').value || '').trim() || 'https://example.co.jp';
-    state.wantWordpress = document.getElementById('wp-connect-check').checked;
-    state.wpConnectContext = 'existing';
     state.gscConnected = false;
-    if (state.wantWordpress) renderWordpressConnect();
-    else analyzeExisting();
+    analyzeExisting();
   });
   pushHistory();
 }
@@ -293,26 +284,25 @@ function renderGscConnect() {
   `, { active: false, nav: false });
   document.getElementById('gsc-authorize').addEventListener('click', () => {
     state.gscConnected = true;
-    if (state.wantWordpress) renderWordpressConnect();
-    else analyzeExisting();
+    analyzeExisting();
   });
   document.getElementById('gsc-cancel').addEventListener('click', () => history.back());
   pushHistory();
 }
 
 // WordPress接続の疑似的な確認画面（プロトタイプ用の仮実装。実際のWordPressサイトへの接続は行わない）
-// 既存メディア理解（3.2）・新規メディア理解（3.3）の両方から呼ばれる（state.wpConnectContextで分岐）
+// 「設定」画面、または記事の公開時（未接続の場合）から呼ばれる（state.wpConnectContextで分岐：'publish' | 'settings'）
 function renderWordpressConnect() {
   state.screen = 'wordpressConnect';
-  const isExisting = state.wpConnectContext === 'existing';
+  const isPublish = state.wpConnectContext === 'publish';
   shell(`
     <div class="wrap">
       <div class="screen-head">
-        <div class="eyebrow">STEP 0-2 ・ メディア理解</div>
+        <div class="eyebrow">${isPublish ? '公開に必要な設定' : '設定'}</div>
         <h1>WordPress と接続します</h1>
-        <p>${isExisting
-          ? '接続すると、記事のタイトル・URL・見出し構成（H2/H3）を取得できます。'
-          : '新しく用意したWordPressサイトと接続しておくと、記事生成後にそのまま公開できるようになります（3.17）。'}</p>
+        <p>${isPublish
+          ? '記事を公開するには、WordPressサイトとの接続が必要です。'
+          : '接続すると、既存記事のタイトル・見出し構成の取得や、記事のワンクリック公開ができるようになります（3.17）。'}</p>
       </div>
       <div class="card">
         <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:14px;">
@@ -323,10 +313,11 @@ function renderWordpressConnect() {
           </div>
         </div>
         <div class="field-grid">
-          <div class="k">サイトURL</div><div class="v"><input id="wp-site-url" type="text" value="${esc(state.siteUrlInput || '')}" placeholder="https://example.co.jp" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;"></div>
+          <div class="k">サイトURL</div><div class="v"><input id="wp-site-url" type="text" value="${esc(state.wordpressSiteUrl || state.siteUrlInput || '')}" placeholder="https://example.co.jp" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;"></div>
           <div class="k">接続方式</div><div class="v">アプリケーションパスワード（デモ）</div>
         </div>
-        <div style="font-size:10.5px;color:var(--sub);margin:10px 0;">※プロトタイプのため、実際のWordPressサイトへの接続は行われません。ボタンを押すと接続済みとして次に進みます。</div>
+        <div style="font-size:10.5px;color:var(--sub);margin:10px 0 4px;">※プロトタイプのため、実際のWordPressサイトへの接続は行われません。ボタンを押すと接続済みとして次に進みます。</div>
+        <div style="font-size:10.5px;color:var(--sub);margin-bottom:10px;">一度接続すると、次回からはこの画面は表示されず、そのまま公開されます。</div>
         <div class="btn-row">
           <button class="btn navy" id="wp-authorize">接続して続ける →</button>
           <button class="btn ghost" id="wp-cancel">← キャンセル</button>
@@ -335,13 +326,15 @@ function renderWordpressConnect() {
     </div>
   `, { active: false, nav: false });
   document.getElementById('wp-authorize').addEventListener('click', async () => {
-    state.siteUrlInput = (document.getElementById('wp-site-url').value || '').trim() || state.siteUrlInput || 'https://example.co.jp';
+    const url = (document.getElementById('wp-site-url').value || '').trim() || state.wordpressSiteUrl || 'https://example.co.jp';
+    state.siteUrlInput = url;
+    state.wordpressSiteUrl = url;
     try {
-      await api('/api/media/wordpress-connect', { body: { mediaId: state.mediaId, siteUrl: state.siteUrlInput } });
+      await api('/api/media/wordpress-connect', { body: { mediaId: state.mediaId, siteUrl: url } });
     } catch (e) { /* デモでは失敗しても先に進める */ }
     state.wordpressConnected = true;
-    if (state.wpConnectContext === 'existing') analyzeExisting();
-    else { renderNewHearing(); askNextBusinessQuestion(); }
+    if (isPublish) doPublish();
+    else renderSettings();
   });
   document.getElementById('wp-cancel').addEventListener('click', () => history.back());
   pushHistory();
@@ -426,9 +419,6 @@ function renderNewBusinessForm() {
           <div class="k">業種</div><div class="v"><input id="biz-industry" type="text" value="外壁塗装業" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;"></div>
           <div class="k">商圏</div><div class="v"><input id="biz-area" type="text" value="関東一円" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;"></div>
         </div>
-        <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ink);cursor:pointer;margin:12px 0 4px;">
-          <input type="checkbox" id="wp-connect-check-new"> 既にWordPressサイトを用意している（接続する）
-        </label>
         <div class="btn-row"><button class="btn navy" id="go-hearing-new">AIヒアリングを始める →</button></div>
       </div>
     </div>
@@ -440,7 +430,6 @@ function renderNewBusinessForm() {
 async function submitBusinessInfo() {
   const industry = (document.getElementById('biz-industry').value || '').trim() || '外壁塗装業';
   const area = (document.getElementById('biz-area').value || '').trim() || '未入力';
-  const wantWordpress = document.getElementById('wp-connect-check-new').checked;
   try {
     await api('/api/media/business-info', { body: { mediaId: state.mediaId, industry, area } });
   } catch (err) {
@@ -449,13 +438,8 @@ async function submitBusinessInfo() {
   }
   state.businessInfo = { industry, area };
   state.newHearing = { history: [], question: null, questionNumber: 0, maxQuestions: 4, done: false, loading: false };
-  state.wpConnectContext = 'new';
-  if (wantWordpress) {
-    renderWordpressConnect();
-  } else {
-    renderNewHearing();
-    askNextBusinessQuestion();
-  }
+  renderNewHearing();
+  askNextBusinessQuestion();
 }
 
 function renderNewHearing() {
@@ -619,6 +603,41 @@ function renderDirectionSummary() {
       ${rows}
     </div>
   `, { active: false });
+  pushHistory();
+}
+
+// ---------------------------------------------------------------
+// 設定画面【新設】：WordPress連携をここで一元管理する
+// ---------------------------------------------------------------
+function renderSettings() {
+  state.screen = 'settings';
+  const connected = !!state.wordpressConnected;
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">設定</div>
+        <h1>WordPress連携</h1>
+        <p>接続すると、既存記事のタイトル・見出し構成の取得（3.2）や、生成した記事のワンクリック公開（3.17）ができるようになります。</p>
+      </div>
+      <div class="card">
+        ${connected ? `
+          <div class="info-box">
+            <div class="h">接続済み</div>${esc(state.wordpressSiteUrl || '')}
+          </div>
+          <div class="btn-row"><button class="btn ghost" id="wp-disconnect">接続を解除する</button></div>
+        ` : `
+          <div class="missing-box">
+            <div class="h">未接続</div>まだWordPressと接続していません。記事を公開する際に接続を求められますが、ここから先に接続しておくこともできます。
+          </div>
+          <div class="btn-row"><button class="btn navy" id="wp-connect-settings">WordPressと接続する →</button></div>
+        `}
+      </div>
+    </div>
+  `, { active: false });
+  const connectBtn = document.getElementById('wp-connect-settings');
+  if (connectBtn) connectBtn.addEventListener('click', () => { state.wpConnectContext = 'settings'; renderWordpressConnect(); });
+  const disconnectBtn = document.getElementById('wp-disconnect');
+  if (disconnectBtn) disconnectBtn.addEventListener('click', () => { state.wordpressConnected = false; renderSettings(); });
   pushHistory();
 }
 
@@ -989,7 +1008,14 @@ function renderArticleEdit() {
     await api('/api/article/save', { body: { sessionId: state.sessionId, article: state.article } });
     toast('下書きを保存しました');
   });
-  document.getElementById('go-publish').addEventListener('click', doPublish);
+  document.getElementById('go-publish').addEventListener('click', () => {
+    if (state.wordpressConnected) {
+      doPublish();
+    } else {
+      state.wpConnectContext = 'publish';
+      renderWordpressConnect();
+    }
+  });
   pushHistory();
 }
 
@@ -1225,6 +1251,7 @@ const SCREEN_RENDERERS = {
   mediaPage: () => renderMediaPage(state.publishInfo && state.publishInfo.articleId),
   monitoring: renderMonitoring,
   fixDetail: renderFixDetail,
+  settings: renderSettings,
 };
 
 window.addEventListener('popstate', (e) => {
