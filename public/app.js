@@ -21,6 +21,7 @@ const state = {
   // ここから：起点（メディア状態判定〜方向性設計）用の状態【新設・v2】
   mediaId: null,
   mediaState: null,
+  siteUrlInput: '',
   businessInfo: null,
   existingAnalysis: null,
   newHearing: { history: [], question: null, questionNumber: 0, maxQuestions: 4, done: false, loading: false },
@@ -227,13 +228,58 @@ function renderExistingUnderstand() {
       </div>
     </div>
   `, { active: false, nav: false });
-  document.getElementById('go-analyze-gsc').addEventListener('click', () => analyzeExisting(true));
-  document.getElementById('go-analyze-nogsc').addEventListener('click', () => analyzeExisting(false));
+  document.getElementById('go-analyze-gsc').addEventListener('click', () => {
+    state.siteUrlInput = (document.getElementById('site-url').value || '').trim() || 'https://example.co.jp';
+    renderGscConnect();
+  });
+  document.getElementById('go-analyze-nogsc').addEventListener('click', () => {
+    state.siteUrlInput = (document.getElementById('site-url').value || '').trim() || 'https://example.co.jp';
+    analyzeExisting(false);
+  });
+  pushHistory();
+}
+
+// GSC連携の疑似的な確認画面（プロトタイプ用の仮実装。実際のGoogleアカウント連携は行わない）
+function renderGscConnect() {
+  state.screen = 'gscConnect';
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">STEP 0-2 ・ メディア理解（既存）</div>
+        <h1>Google Search Console と連携します</h1>
+        <p>連携すると、検索クエリ・掲載順位・インデックス済みURLなどのデータを取得できます。</p>
+      </div>
+      <div class="card">
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:14px;">
+          <span style="font-size:22px;">🔎</span>
+          <div>
+            <div style="font-weight:700;font-size:13.5px;">Google Search Console</div>
+            <div style="font-size:11.5px;color:var(--sub);">対象サイト：${esc(state.siteUrlInput || 'https://example.co.jp')}</div>
+          </div>
+        </div>
+        <div class="k" style="font-size:12.5px;font-weight:700;color:var(--sub);margin-bottom:6px;">連携すると取得できるデータ</div>
+        <ul class="reason-list">
+          <li>検索クエリ・クリック数・表示回数・掲載順位</li>
+          <li>インデックス済みURLの一覧</li>
+        </ul>
+        <div class="info-box" style="margin:10px 0;">
+          <div class="h">連携するアカウント（デモ）</div>demo-owner@example.co.jp
+        </div>
+        <div style="font-size:10.5px;color:var(--sub);margin-bottom:10px;">※プロトタイプのため、実際のGoogleアカウントとの連携は行われません。ボタンを押すと連携済みとして次に進みます。</div>
+        <div class="btn-row">
+          <button class="btn navy" id="gsc-authorize">連携して続ける →</button>
+          <button class="btn ghost" id="gsc-cancel">← キャンセル</button>
+        </div>
+      </div>
+    </div>
+  `, { active: false, nav: false });
+  document.getElementById('gsc-authorize').addEventListener('click', () => analyzeExisting(true));
+  document.getElementById('gsc-cancel').addEventListener('click', renderExistingUnderstand);
   pushHistory();
 }
 
 async function analyzeExisting(withGsc) {
-  const siteUrl = (document.getElementById('site-url').value || '').trim() || 'https://example.co.jp';
+  const siteUrl = state.siteUrlInput || 'https://example.co.jp';
   shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>${withGsc ? 'サイト構成・検索順位・GSCデータを分析しています…' : 'サイト構成を簡易クロールで分析しています…（GSC未連携）'}</div></div>`, { active: false, nav: false });
   let analysis;
   try {
@@ -1066,6 +1112,7 @@ async function renderFixDetail() {
 const SCREEN_RENDERERS = {
   mediaState: renderMediaState,
   understandExistingForm: renderExistingUnderstand,
+  gscConnect: renderGscConnect,
   understandExistingResult: renderExistingAnalysisResult,
   understandNewForm: renderNewBusinessForm,
   understandNewHearing: renderNewHearing,
