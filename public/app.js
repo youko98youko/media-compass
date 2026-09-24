@@ -87,6 +87,19 @@ function esc(s) {
 }
 
 // ---------------------------------------------------------------
+// ブラウザの戻る/進むボタン対応【新設】
+// 画面が切り替わるたびに、その時点のstateごと履歴に積む。
+// popstateで戻ってきたら、そのstateを復元して同じ画面を再描画する（サーバーへの再取得は行わない）。
+// ---------------------------------------------------------------
+let isRestoringHistory = false;
+
+function pushHistory() {
+  if (isRestoringHistory) return;
+  const snapshot = JSON.parse(JSON.stringify(state));
+  history.pushState({ screen: state.screen, snapshot }, '', location.href);
+}
+
+// ---------------------------------------------------------------
 // 画像プレースホルダー生成（画像生成APIの代わりの仮実装。UX検証用）
 // ---------------------------------------------------------------
 const PALETTES = [
@@ -173,6 +186,7 @@ function renderMediaState() {
   `, { active: false, nav: false });
   document.getElementById('pick-existing').addEventListener('click', () => pickMediaState('existing'));
   document.getElementById('pick-new').addEventListener('click', () => pickMediaState('new'));
+  pushHistory();
 }
 
 async function pickMediaState(mediaState) {
@@ -193,47 +207,59 @@ async function pickMediaState(mediaState) {
 // STEP 0-2a: メディア理解（既存メディアの場合）【新設・v2】
 // ---------------------------------------------------------------
 function renderExistingUnderstand() {
-  state.screen = 'understandExisting';
+  state.screen = 'understandExistingForm';
   shell(`
     <div class="wrap">
       <div class="screen-head">
         <div class="eyebrow">STEP 0-2 ・ メディア理解（既存）</div>
         <h1>既存メディアを分析する</h1>
-        <p>サイトURLとGSC連携から、現状の記事・検索順位・カバレッジ状況を分析します（3.2）。</p>
+        <p>サイトURLをもとに、現状の記事・検索順位・カバレッジ状況を分析します（3.2）。</p>
       </div>
       <div class="card">
         <div class="field-grid">
           <div class="k">サイトURL</div><div class="v"><input id="site-url" type="text" placeholder="https://example.co.jp" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;"></div>
         </div>
-        <div style="font-size:11px;color:var(--sub);margin:6px 0 12px;">未定：既存記事一覧の取得手段（GSC連携／簡易クロール／手動アップロードのいずれを主手段とするか）</div>
-        <div class="btn-row"><button class="btn navy" id="go-analyze">GSCと連携して分析する →</button></div>
+        <div style="font-size:11px;color:var(--sub);margin:6px 0 12px;">未定：既存記事一覧の取得手段（GSC連携／簡易クロール／手動アップロードのいずれを主手段とするか）。本デモでは、GSC連携の有無で分析結果が変わる2パターンを体験できます。</div>
+        <div class="btn-row">
+          <button class="btn navy" id="go-analyze-gsc">GSCと連携して分析する →</button>
+          <button class="btn outline" id="go-analyze-nogsc">GSCと連携しないで分析する →</button>
+        </div>
       </div>
     </div>
   `, { active: false, nav: false });
-  document.getElementById('go-analyze').addEventListener('click', analyzeExisting);
+  document.getElementById('go-analyze-gsc').addEventListener('click', () => analyzeExisting(true));
+  document.getElementById('go-analyze-nogsc').addEventListener('click', () => analyzeExisting(false));
+  pushHistory();
 }
 
-async function analyzeExisting() {
+async function analyzeExisting(withGsc) {
   const siteUrl = (document.getElementById('site-url').value || '').trim() || 'https://example.co.jp';
-  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>サイト構成・検索順位・GSCデータを分析しています…</div></div>`, { active: false, nav: false });
+  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>${withGsc ? 'サイト構成・検索順位・GSCデータを分析しています…' : 'サイト構成を簡易クロールで分析しています…（GSC未連携）'}</div></div>`, { active: false, nav: false });
   let analysis;
   try {
-    ({ analysis } = await api('/api/media/understand-existing', { body: { mediaId: state.mediaId, siteUrl } }));
+    ({ analysis } = await api('/api/media/understand-existing', { body: { mediaId: state.mediaId, siteUrl, withGsc } }));
   } catch (err) {
     showFatalError(err);
     return;
   }
   state.existingAnalysis = analysis;
+  renderExistingAnalysisResult();
+}
+
+function renderExistingAnalysisResult() {
+  state.screen = 'understandExistingResult';
+  const analysis = state.existingAnalysis;
   shell(`
     <div class="wrap">
       <div class="screen-head">
         <div class="eyebrow">STEP 0-2 ・ メディア理解（既存）</div>
         <h1>分析結果</h1>
+        <p>${analysis.withGsc ? 'Google Search Consoleと連携した分析結果です。' : 'GSCとは連携せず、サイトの簡易クロールのみで分析した結果です。'}</p>
       </div>
       <div class="card">
         <div class="field-grid">
           <div class="k">既存記事数</div><div class="v">${analysis.articlesCount}本</div>
-          <div class="k">主な検索クエリ</div><div class="v">${analysis.topQueries.map(esc).join(' / ')}</div>
+          <div class="k">主な検索クエリ</div><div class="v">${analysis.topQueries.length ? analysis.topQueries.map(esc).join(' / ') : 'GSC未連携のため取得できません'}</div>
         </div>
         <div class="missing-box" style="margin-top:10px;">
           <div class="h">カニバリゼーションの兆候</div>
@@ -247,6 +273,7 @@ async function analyzeExisting() {
     </div>
   `, { active: false, nav: false });
   document.getElementById('go-direction').addEventListener('click', renderDirectionGenerating);
+  pushHistory();
 }
 
 // ---------------------------------------------------------------
@@ -271,6 +298,7 @@ function renderNewBusinessForm() {
     </div>
   `, { active: false, nav: false });
   document.getElementById('go-hearing-new').addEventListener('click', submitBusinessInfo);
+  pushHistory();
 }
 
 async function submitBusinessInfo() {
@@ -326,6 +354,7 @@ function renderNewHearing() {
   if (sendBtn) sendBtn.addEventListener('click', submitBusinessAnswer);
   const goDir = document.getElementById('go-direction2');
   if (goDir) goDir.addEventListener('click', renderDirectionGenerating);
+  if (!h.loading) pushHistory();
 }
 
 async function askNextBusinessQuestion() {
@@ -421,6 +450,7 @@ function renderDirectionConfirm() {
     </div>
   `, { active: false, nav: false });
   document.getElementById('confirm-direction').addEventListener('click', confirmDirection);
+  pushHistory();
 }
 
 async function confirmDirection() {
@@ -447,6 +477,7 @@ function renderDirectionSummary() {
       ${rows}
     </div>
   `, { active: false });
+  pushHistory();
 }
 
 // ---------------------------------------------------------------
@@ -507,6 +538,7 @@ async function renderDashboard() {
   app.querySelectorAll('[data-theme]').forEach((c) => {
     c.addEventListener('click', (e) => { if (!e.target.closest('button')) selectTheme(c.dataset.theme); });
   });
+  pushHistory();
 }
 
 async function selectTheme(themeId) {
@@ -557,6 +589,7 @@ function renderThemeDetail() {
   `);
   document.getElementById('go-primary').addEventListener('click', renderPrimaryInfo);
   document.getElementById('back-dash').addEventListener('click', renderDashboard);
+  pushHistory();
 }
 
 // ---------------------------------------------------------------
@@ -589,6 +622,7 @@ function renderPrimaryInfo() {
     </div>
   `);
   document.getElementById('go-hearing').addEventListener('click', () => { renderHearing(); askNextQuestion(); });
+  pushHistory();
 }
 
 // ---------------------------------------------------------------
@@ -633,6 +667,7 @@ function renderHearing() {
   if (sendBtn) sendBtn.addEventListener('click', submitAnswer);
   const goOutline = document.getElementById('go-outline');
   if (goOutline) goOutline.addEventListener('click', renderOutlineGenerating);
+  if (!state.hearing.loading) pushHistory();
 }
 
 async function askNextQuestion() {
@@ -722,6 +757,7 @@ function renderOutline() {
     </div>
   `);
   document.getElementById('go-generate').addEventListener('click', renderArticleGenerating);
+  pushHistory();
 }
 
 // ---------------------------------------------------------------
@@ -812,6 +848,7 @@ function renderArticleEdit() {
     toast('下書きを保存しました');
   });
   document.getElementById('go-publish').addEventListener('click', doPublish);
+  pushHistory();
 }
 
 async function regenerateBlock(idx) {
@@ -859,6 +896,7 @@ function renderPublishedStatus() {
   document.getElementById('open-media-btn').addEventListener('click', () => renderMediaPage(state.publishInfo.articleId));
   document.getElementById('open-media').addEventListener('click', (e) => { e.preventDefault(); renderMediaPage(state.publishInfo.articleId); });
   document.getElementById('back-dash2').addEventListener('click', renderDashboard);
+  pushHistory();
 }
 
 function blockToReaderHtml(block) {
@@ -880,6 +918,7 @@ function blockToReaderHtml(block) {
 }
 
 async function renderMediaPage(articleId) {
+  state.screen = 'mediaPage';
   app.innerHTML = `<div class="loading-box"><div class="spinner"></div>読み込み中…</div>`;
   let rec;
   try {
@@ -915,6 +954,7 @@ async function renderMediaPage(articleId) {
     <button class="btn navy" style="position:fixed;bottom:20px;right:20px;z-index:30;" id="back-to-app">← プロトタイプに戻る</button>
   `;
   document.getElementById('back-to-app').addEventListener('click', renderPublishedStatus);
+  pushHistory();
 }
 
 // ---------------------------------------------------------------
@@ -960,9 +1000,11 @@ async function renderMonitoring() {
   `, { active: false });
   state.fixArticle = fixCandidate;
   document.getElementById('fix-card').addEventListener('click', renderFixDetail);
+  pushHistory();
 }
 
 async function renderFixDetail() {
+  state.screen = 'fixDetail';
   let rec;
   try {
     rec = await api(`/api/fix-candidates/${state.fixArticle.id}`);
@@ -1015,6 +1057,39 @@ async function renderFixDetail() {
       }
     });
   });
+  pushHistory();
 }
+
+// ---------------------------------------------------------------
+// ブラウザの戻る/進むボタン対応【新設】：画面名 → 再描画関数のマッピング
+// ---------------------------------------------------------------
+const SCREEN_RENDERERS = {
+  mediaState: renderMediaState,
+  understandExistingForm: renderExistingUnderstand,
+  understandExistingResult: renderExistingAnalysisResult,
+  understandNewForm: renderNewBusinessForm,
+  understandNewHearing: renderNewHearing,
+  directionConfirm: renderDirectionConfirm,
+  direction: renderDirectionSummary,
+  dashboard: renderDashboard,
+  themeDetail: renderThemeDetail,
+  primaryInfo: renderPrimaryInfo,
+  hearing: renderHearing,
+  outline: renderOutline,
+  articleEdit: renderArticleEdit,
+  published: renderPublishedStatus,
+  mediaPage: () => renderMediaPage(state.publishInfo && state.publishInfo.articleId),
+  monitoring: renderMonitoring,
+  fixDetail: renderFixDetail,
+};
+
+window.addEventListener('popstate', (e) => {
+  if (!e.state) return;
+  isRestoringHistory = true;
+  Object.assign(state, e.state.snapshot);
+  const renderFn = SCREEN_RENDERERS[e.state.screen];
+  if (renderFn) renderFn();
+  isRestoringHistory = false;
+});
 
 renderMediaState();

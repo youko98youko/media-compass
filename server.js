@@ -86,14 +86,21 @@ const SEED_FIX_ARTICLE = {
 };
 
 // メディア理解・方向性設計のデモ用シード（既存メディア側の疑似分析結果）
-const EXISTING_SITE_SEED = {
-  articlesCount: 18,
-  topQueries: ['外壁塗装 業者 比較', '外壁塗装 費用', '屋根塗装 時期'],
-  cannibalization: [
-    { topic: '費用相場', articles: ['外壁塗装の費用相場について', '塗装費用はいくら？相場ガイド'] },
-  ],
-  coverageNote: '「基礎知識」「実績紹介」は手厚いが、「失敗事例」「アフター保証」は未着手のテーマが多い',
-};
+// GSC連携の有無で内容が変わる（仕様書12章：既存記事一覧の取得手段はGSC連携／簡易クロール／手動アップロードのいずれかが未定のため、
+// 本デモではGSC連携あり・なしの2パターンを体験できるようにしている）
+function buildExistingAnalysis(withGsc) {
+  return {
+    withGsc,
+    articlesCount: 18,
+    topQueries: withGsc ? ['外壁塗装 業者 比較', '外壁塗装 費用', '屋根塗装 時期'] : [],
+    cannibalization: [
+      { topic: '費用相場', articles: ['外壁塗装の費用相場について', '塗装費用はいくら？相場ガイド'] },
+    ],
+    coverageNote: withGsc
+      ? '「基礎知識」「実績紹介」は手厚いが、「失敗事例」「アフター保証」は未着手のテーマが多い'
+      : '「基礎知識」「実績紹介」は手厚いが、「失敗事例」「アフター保証」は未着手のテーマが多い（GSC未連携のため、記事タイトル・見出しの簡易クロールによる推定です）',
+  };
+}
 
 const DIRECTION_SIMULATION = {
   existing: [
@@ -228,10 +235,11 @@ app.post('/api/media/state', (req, res) => {
 app.post('/api/media/understand-existing', (req, res) => {
   const m = getMediaProfile(req, res);
   if (!m) return;
-  const { siteUrl } = req.body || {};
+  const { siteUrl, withGsc } = req.body || {};
   m.siteUrl = siteUrl || '(未入力)';
-  m.existingAnalysis = EXISTING_SITE_SEED;
-  res.json({ analysis: EXISTING_SITE_SEED });
+  const analysis = buildExistingAnalysis(!!withGsc);
+  m.existingAnalysis = analysis;
+  res.json({ analysis });
 });
 
 // STEP 0-2b: 新規メディア理解（事業情報の登録＋事業理解ヒアリング／3.3）
