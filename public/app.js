@@ -26,6 +26,10 @@ const state = {
   existingAnalysis: null,
   newHearing: { history: [], question: null, questionNumber: 0, maxQuestions: 4, done: false, loading: false },
   direction: null,
+  gscConnected: false,
+  wantWordpress: false,
+  wordpressConnected: false,
+  wpConnectContext: null, // 'existing' | 'new'
 };
 
 const STEPS = ['テーマ選定', '一次情報', 'AIヒアリング', '記事構成・生成', '装飾・確認', '公開'];
@@ -200,6 +204,11 @@ async function pickMediaState(mediaState) {
   }
   state.mediaId = mediaId;
   state.mediaState = mediaState;
+  state.siteUrlInput = '';
+  state.gscConnected = false;
+  state.wantWordpress = false;
+  state.wordpressConnected = false;
+  state.wpConnectContext = null;
   if (mediaState === 'existing') renderExistingUnderstand();
   else renderNewBusinessForm();
 }
@@ -220,7 +229,10 @@ function renderExistingUnderstand() {
         <div class="field-grid">
           <div class="k">サイトURL</div><div class="v"><input id="site-url" type="text" placeholder="https://example.co.jp" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;"></div>
         </div>
-        <div style="font-size:11px;color:var(--sub);margin:6px 0 12px;">未定：既存記事一覧の取得手段（GSC連携／簡易クロール／手動アップロードのいずれを主手段とするか）。本デモでは、GSC連携の有無で分析結果が変わる2パターンを体験できます。</div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ink);cursor:pointer;margin:12px 0 4px;">
+          <input type="checkbox" id="wp-connect-check"> WordPressと接続する（記事のタイトル・見出し構成まで取得できます）
+        </label>
+        <div style="font-size:11px;color:var(--sub);margin:6px 0 12px;">未定：既存記事一覧の取得手段（GSC連携／簡易クロール／手動アップロード／CMS連携のいずれを主手段とするか）。本デモでは、これらを組み合わせて体験できます。</div>
         <div class="btn-row">
           <button class="btn navy" id="go-analyze-gsc">GSCと連携して分析する →</button>
           <button class="btn outline" id="go-analyze-nogsc">GSCと連携しないで分析する →</button>
@@ -230,11 +242,17 @@ function renderExistingUnderstand() {
   `, { active: false, nav: false });
   document.getElementById('go-analyze-gsc').addEventListener('click', () => {
     state.siteUrlInput = (document.getElementById('site-url').value || '').trim() || 'https://example.co.jp';
+    state.wantWordpress = document.getElementById('wp-connect-check').checked;
+    state.wpConnectContext = 'existing';
     renderGscConnect();
   });
   document.getElementById('go-analyze-nogsc').addEventListener('click', () => {
     state.siteUrlInput = (document.getElementById('site-url').value || '').trim() || 'https://example.co.jp';
-    analyzeExisting(false);
+    state.wantWordpress = document.getElementById('wp-connect-check').checked;
+    state.wpConnectContext = 'existing';
+    state.gscConnected = false;
+    if (state.wantWordpress) renderWordpressConnect();
+    else analyzeExisting();
   });
   pushHistory();
 }
@@ -273,17 +291,74 @@ function renderGscConnect() {
       </div>
     </div>
   `, { active: false, nav: false });
-  document.getElementById('gsc-authorize').addEventListener('click', () => analyzeExisting(true));
-  document.getElementById('gsc-cancel').addEventListener('click', renderExistingUnderstand);
+  document.getElementById('gsc-authorize').addEventListener('click', () => {
+    state.gscConnected = true;
+    if (state.wantWordpress) renderWordpressConnect();
+    else analyzeExisting();
+  });
+  document.getElementById('gsc-cancel').addEventListener('click', () => history.back());
   pushHistory();
 }
 
-async function analyzeExisting(withGsc) {
+// WordPress接続の疑似的な確認画面（プロトタイプ用の仮実装。実際のWordPressサイトへの接続は行わない）
+// 既存メディア理解（3.2）・新規メディア理解（3.3）の両方から呼ばれる（state.wpConnectContextで分岐）
+function renderWordpressConnect() {
+  state.screen = 'wordpressConnect';
+  const isExisting = state.wpConnectContext === 'existing';
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">STEP 0-2 ・ メディア理解</div>
+        <h1>WordPress と接続します</h1>
+        <p>${isExisting
+          ? '接続すると、記事のタイトル・URL・見出し構成（H2/H3）を取得できます。'
+          : '新しく用意したWordPressサイトと接続しておくと、記事生成後にそのまま公開できるようになります（3.17）。'}</p>
+      </div>
+      <div class="card">
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:14px;">
+          <span style="font-size:22px;">📝</span>
+          <div>
+            <div style="font-weight:700;font-size:13.5px;">WordPress</div>
+            <div style="font-size:11.5px;color:var(--sub);">サイトのURLを入力してください</div>
+          </div>
+        </div>
+        <div class="field-grid">
+          <div class="k">サイトURL</div><div class="v"><input id="wp-site-url" type="text" value="${esc(state.siteUrlInput || '')}" placeholder="https://example.co.jp" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;"></div>
+          <div class="k">接続方式</div><div class="v">アプリケーションパスワード（デモ）</div>
+        </div>
+        <div style="font-size:10.5px;color:var(--sub);margin:10px 0;">※プロトタイプのため、実際のWordPressサイトへの接続は行われません。ボタンを押すと接続済みとして次に進みます。</div>
+        <div class="btn-row">
+          <button class="btn navy" id="wp-authorize">接続して続ける →</button>
+          <button class="btn ghost" id="wp-cancel">← キャンセル</button>
+        </div>
+      </div>
+    </div>
+  `, { active: false, nav: false });
+  document.getElementById('wp-authorize').addEventListener('click', async () => {
+    state.siteUrlInput = (document.getElementById('wp-site-url').value || '').trim() || state.siteUrlInput || 'https://example.co.jp';
+    try {
+      await api('/api/media/wordpress-connect', { body: { mediaId: state.mediaId, siteUrl: state.siteUrlInput } });
+    } catch (e) { /* デモでは失敗しても先に進める */ }
+    state.wordpressConnected = true;
+    if (state.wpConnectContext === 'existing') analyzeExisting();
+    else { renderNewHearing(); askNextBusinessQuestion(); }
+  });
+  document.getElementById('wp-cancel').addEventListener('click', () => history.back());
+  pushHistory();
+}
+
+async function analyzeExisting() {
   const siteUrl = state.siteUrlInput || 'https://example.co.jp';
-  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>${withGsc ? 'サイト構成・検索順位・GSCデータを分析しています…' : 'サイト構成を簡易クロールで分析しています…（GSC未連携）'}</div></div>`, { active: false, nav: false });
+  const withGsc = !!state.gscConnected;
+  const withWordpress = !!state.wordpressConnected;
+  const loadingMsgs = [];
+  if (withGsc) loadingMsgs.push('検索順位・GSCデータ');
+  if (withWordpress) loadingMsgs.push('WordPressの記事・見出し構成');
+  loadingMsgs.push('サイト構成');
+  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>${loadingMsgs.join('・')}を分析しています…</div></div>`, { active: false, nav: false });
   let analysis;
   try {
-    ({ analysis } = await api('/api/media/understand-existing', { body: { mediaId: state.mediaId, siteUrl, withGsc } }));
+    ({ analysis } = await api('/api/media/understand-existing', { body: { mediaId: state.mediaId, siteUrl, withGsc, withWordpress } }));
   } catch (err) {
     showFatalError(err);
     return;
@@ -300,7 +375,10 @@ function renderExistingAnalysisResult() {
       <div class="screen-head">
         <div class="eyebrow">STEP 0-2 ・ メディア理解（既存）</div>
         <h1>分析結果</h1>
-        <p>${analysis.withGsc ? 'Google Search Consoleと連携した分析結果です。' : 'GSCとは連携せず、サイトの簡易クロールのみで分析した結果です。'}</p>
+        <p>
+          ${analysis.withGsc ? 'Google Search Consoleと連携した分析結果です。' : 'GSCとは連携せず、サイトの簡易クロールのみで分析した結果です。'}
+          ${analysis.withWordpress ? 'WordPressとも接続し、記事の見出し構成まで取得しています。' : ''}
+        </p>
       </div>
       <div class="card">
         <div class="field-grid">
@@ -314,6 +392,15 @@ function renderExistingAnalysisResult() {
         <div class="info-box" style="margin-top:10px;">
           <div class="h">カバレッジの傾向</div>${esc(analysis.coverageNote)}
         </div>
+        ${analysis.headingSample ? `
+        <div class="k" style="font-size:12.5px;font-weight:700;color:var(--sub);margin:14px 0 6px;">WordPressから取得した見出し構成（サンプル）</div>
+        ${analysis.headingSample.map((a) => `
+          <div class="outline-item">
+            <div class="h2">${esc(a.title)}</div>
+            ${a.headings.map((h) => `<div class="h3">${esc(h)}</div>`).join('')}
+          </div>
+        `).join('')}
+        ` : ''}
         <div class="btn-row"><button class="btn navy" id="go-direction">メディアの方向性を見る →</button></div>
       </div>
     </div>
@@ -339,6 +426,9 @@ function renderNewBusinessForm() {
           <div class="k">業種</div><div class="v"><input id="biz-industry" type="text" value="外壁塗装業" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;"></div>
           <div class="k">商圏</div><div class="v"><input id="biz-area" type="text" value="関東一円" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;"></div>
         </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ink);cursor:pointer;margin:12px 0 4px;">
+          <input type="checkbox" id="wp-connect-check-new"> 既にWordPressサイトを用意している（接続する）
+        </label>
         <div class="btn-row"><button class="btn navy" id="go-hearing-new">AIヒアリングを始める →</button></div>
       </div>
     </div>
@@ -350,6 +440,7 @@ function renderNewBusinessForm() {
 async function submitBusinessInfo() {
   const industry = (document.getElementById('biz-industry').value || '').trim() || '外壁塗装業';
   const area = (document.getElementById('biz-area').value || '').trim() || '未入力';
+  const wantWordpress = document.getElementById('wp-connect-check-new').checked;
   try {
     await api('/api/media/business-info', { body: { mediaId: state.mediaId, industry, area } });
   } catch (err) {
@@ -358,8 +449,13 @@ async function submitBusinessInfo() {
   }
   state.businessInfo = { industry, area };
   state.newHearing = { history: [], question: null, questionNumber: 0, maxQuestions: 4, done: false, loading: false };
-  renderNewHearing();
-  askNextBusinessQuestion();
+  state.wpConnectContext = 'new';
+  if (wantWordpress) {
+    renderWordpressConnect();
+  } else {
+    renderNewHearing();
+    askNextBusinessQuestion();
+  }
 }
 
 function renderNewHearing() {
@@ -400,7 +496,7 @@ function renderNewHearing() {
   if (sendBtn) sendBtn.addEventListener('click', submitBusinessAnswer);
   const goDir = document.getElementById('go-direction2');
   if (goDir) goDir.addEventListener('click', renderDirectionGenerating);
-  if (!h.loading) pushHistory();
+  if (!h.loading && (h.question || h.done || h.history.length)) pushHistory();
 }
 
 async function askNextBusinessQuestion() {
@@ -713,7 +809,7 @@ function renderHearing() {
   if (sendBtn) sendBtn.addEventListener('click', submitAnswer);
   const goOutline = document.getElementById('go-outline');
   if (goOutline) goOutline.addEventListener('click', renderOutlineGenerating);
-  if (!state.hearing.loading) pushHistory();
+  if (!state.hearing.loading && (state.hearing.question || state.hearing.done || state.hearing.history.length)) pushHistory();
 }
 
 async function askNextQuestion() {
@@ -1113,6 +1209,7 @@ const SCREEN_RENDERERS = {
   mediaState: renderMediaState,
   understandExistingForm: renderExistingUnderstand,
   gscConnect: renderGscConnect,
+  wordpressConnect: renderWordpressConnect,
   understandExistingResult: renderExistingAnalysisResult,
   understandNewForm: renderNewBusinessForm,
   understandNewHearing: renderNewHearing,

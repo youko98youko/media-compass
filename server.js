@@ -86,11 +86,12 @@ const SEED_FIX_ARTICLE = {
 };
 
 // メディア理解・方向性設計のデモ用シード（既存メディア側の疑似分析結果）
-// GSC連携の有無で内容が変わる（仕様書12章：既存記事一覧の取得手段はGSC連携／簡易クロール／手動アップロードのいずれかが未定のため、
-// 本デモではGSC連携あり・なしの2パターンを体験できるようにしている）
-function buildExistingAnalysis(withGsc) {
+// GSC連携・WordPress接続の有無で内容が変わる（仕様書12章：既存記事一覧の取得手段はGSC連携／簡易クロール／手動アップロード／
+// CMS連携のいずれかが未定のため、本デモでは組み合わせを体験できるようにしている）
+function buildExistingAnalysis(withGsc, withWordpress) {
   return {
     withGsc,
+    withWordpress,
     articlesCount: 18,
     topQueries: withGsc ? ['外壁塗装 業者 比較', '外壁塗装 費用', '屋根塗装 時期'] : [],
     cannibalization: [
@@ -99,6 +100,10 @@ function buildExistingAnalysis(withGsc) {
     coverageNote: withGsc
       ? '「基礎知識」「実績紹介」は手厚いが、「失敗事例」「アフター保証」は未着手のテーマが多い'
       : '「基礎知識」「実績紹介」は手厚いが、「失敗事例」「アフター保証」は未着手のテーマが多い（GSC未連携のため、記事タイトル・見出しの簡易クロールによる推定です）',
+    headingSample: withWordpress ? [
+      { title: '外壁塗装の費用相場について', headings: ['H2：外壁塗装の相場とは', 'H2：費用の内訳', 'H3：塗料別の価格差', 'H2：安く抑えるコツ'] },
+      { title: '外壁塗装の色選びで失敗しないコツ', headings: ['H2：人気の色ランキング', 'H2：色選びで失敗する理由', 'H3：近隣とのバランス'] },
+    ] : null,
   };
 }
 
@@ -223,6 +228,7 @@ app.post('/api/media/state', (req, res) => {
     mediaState,
     siteUrl: null,
     businessInfo: null,
+    wordpress: null,
     hearing: { history: [], lastQuestion: null, done: false, maxQuestions: 4 },
     existingAnalysis: null,
     topicClusters: null,
@@ -235,11 +241,20 @@ app.post('/api/media/state', (req, res) => {
 app.post('/api/media/understand-existing', (req, res) => {
   const m = getMediaProfile(req, res);
   if (!m) return;
-  const { siteUrl, withGsc } = req.body || {};
+  const { siteUrl, withGsc, withWordpress } = req.body || {};
   m.siteUrl = siteUrl || '(未入力)';
-  const analysis = buildExistingAnalysis(!!withGsc);
+  const analysis = buildExistingAnalysis(!!withGsc, !!withWordpress);
   m.existingAnalysis = analysis;
   res.json({ analysis });
+});
+
+// WordPress接続（既存・新規どちらのメディア理解からも呼ばれる。将来の公開時CMS連携／3.17にもつながる想定）
+app.post('/api/media/wordpress-connect', (req, res) => {
+  const m = getMediaProfile(req, res);
+  if (!m) return;
+  const { siteUrl } = req.body || {};
+  m.wordpress = { connected: true, siteUrl: siteUrl || '(未入力)' };
+  res.json({ ok: true, siteUrl: m.wordpress.siteUrl });
 });
 
 // STEP 0-2b: 新規メディア理解（事業情報の登録＋事業理解ヒアリング／3.3）
