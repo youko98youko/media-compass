@@ -646,16 +646,17 @@ function renderSettings() {
 // ---------------------------------------------------------------
 async function renderDashboard() {
   state.screen = 'dashboard';
-  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>読み込み中…</div></div>`, { active: false });
-  let themes, aiEnabled, direction;
+  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>${state.mediaId && state.aiEnabled ? 'AIが、方向性と事業情報から「今、作るべき記事テーマ」を考えています…（10〜20秒ほどかかります）' : '読み込み中…'}</div></div>`, { active: false });
+  let themes, aiEnabled, direction, themesMode;
   try {
     const q = state.mediaId ? `?mediaId=${encodeURIComponent(state.mediaId)}` : '';
-    ({ themes, aiEnabled, direction } = await api(`/api/themes${q}`));
+    ({ themes, aiEnabled, direction, themesMode } = await api(`/api/themes${q}`));
   } catch (err) {
     showFatalError(err);
     return;
   }
   state.themes = themes;
+  state.themesMode = themesMode;
   state.aiEnabled = aiEnabled;
   if (direction) state.direction = direction;
 
@@ -673,6 +674,7 @@ async function renderDashboard() {
       <h3>${esc(t.title)}</h3>
       <div class="field-grid">
         <div class="k">想定キーワード</div><div class="v">${esc(t.keyword)}</div>
+        ${t.volumeEstimate ? `<div class="k">検索ボリューム</div><div class="v">${esc(t.volumeEstimate)} <span class="pill grey">AI推測</span></div>` : ''}
       </div>
       <ul class="reason-list">${t.reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
       <div class="btn-row"><button class="btn gold small" data-theme-go="${t.id}">このテーマを見る →</button></div>
@@ -686,6 +688,7 @@ async function renderDashboard() {
         <p>検索需要・競合状況・自社の一次情報をもとに、次に作るべき記事テーマを優先順位付きで提示します。</p>
       </div>
       ${directionBanner}
+      ${state.themes.some((t) => t.estimated) ? '<div class="info-box"><div class="h">この提案について</div>テーマはAI（ChatGPT）が、方向性・事業情報・事業ヒアリングの回答から生成しました。検索ボリューム・競合状況はAIの推測値です（外部の検索データ連携が済むまでの暫定表示で、実データではありません）。</div>' : ''}
       ${cards}
     </div>
   `, { active: false });
@@ -705,7 +708,7 @@ async function renderDashboard() {
 async function selectTheme(themeId) {
   let sessionId, theme, availablePrimaryInfo;
   try {
-    ({ sessionId, theme, availablePrimaryInfo } = await api('/api/session', { body: { themeId } }));
+    ({ sessionId, theme, availablePrimaryInfo } = await api('/api/session', { body: { themeId, mediaId: state.mediaId } }));
   } catch (err) {
     showFatalError(err);
     return;
@@ -737,7 +740,8 @@ function renderThemeDetail() {
           <div class="k">推奨優先度</div><div class="v">${esc(t.priority)}</div>
           <div class="k">想定キーワード</div><div class="v">${esc(t.keyword)}</div>
           <div class="k">想定検索ニーズ</div><div class="v">${esc(t.searchIntent)}</div>
-          <div class="k">競合状況</div><div class="v">${esc(t.competition)}</div>
+          <div class="k">競合状況</div><div class="v">${esc(t.competition)}${t.estimated ? ' <span class="pill grey">AI推測</span>' : ''}</div>
+          ${t.volumeEstimate ? `<div class="k">検索ボリューム</div><div class="v">${esc(t.volumeEstimate)} <span class="pill grey">AI推測</span></div>` : ''}
         </div>
         <div class="k" style="font-size:12.5px;font-weight:700;color:var(--sub);margin-top:10px;">作るべき理由</div>
         <ul class="reason-list">${t.reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
@@ -1263,4 +1267,11 @@ window.addEventListener('popstate', (e) => {
   isRestoringHistory = false;
 });
 
-renderMediaState();
+// 起動時にAI連携の有効/無効を取得してから最初の画面を描画する（バッジの表示を正しくするため）
+(async () => {
+  try {
+    const { aiEnabled } = await api('/api/themes');
+    state.aiEnabled = !!aiEnabled;
+  } catch (e) { /* サーバー未接続でも最初の画面は表示する */ }
+  renderMediaState();
+})();

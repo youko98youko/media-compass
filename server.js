@@ -315,6 +315,7 @@ app.post('/api/media/direction', async (req, res) => {
   });
 
   m.topicClusters = data.clusters;
+  m.themes = null; // 方向性が変わったらテーマ候補は再生成する
   res.json({ clusters: data.clusters, topCluster: topClusterOf(data.clusters), mode });
 });
 
@@ -328,40 +329,126 @@ app.post('/api/media/confirm-direction', (req, res) => {
 // ---------------------------------------------------------------
 // ルート: テーマ一覧・セッション
 // ---------------------------------------------------------------
-app.get('/api/themes', (req, res) => {
-  const themes = THEMES.map((t) => ({
+// 事業ヒアリングの回答を「一次情報（事業の強み・実績）」として扱う（3.3 → 記事作成へ引き継ぐ）
+function businessPrimaryInfo(m) {
+  if (!m) return [];
+  return m.hearing.history.map((h, i) => ({
+    id: `bh${i + 1}`,
+    label: '事業ヒアリングで得た情報',
+    text: `${h.question} → ${h.answer}`,
+  }));
+}
+
+// 記事作成AIへ渡す「メディア全体の文脈」（事業情報・方向性・事業の強み）
+function mediaContextText(m) {
+  if (!m) return '';
+  const parts = [];
+  if (m.businessInfo) parts.push(`業種: ${m.businessInfo.industry} / 商圏: ${m.businessInfo.area}`);
+  if (m.topicClusters) parts.push(`メディアの方向性（テーマ領域）: ${m.topicClusters.map((c) => `${c.name}(優先度${c.priority})`).join('、')}`);
+  if (m.hearing.history.length) parts.push(`事業の強み・実績（事業ヒアリング）: ${m.hearing.history.map((h) => h.answer).join(' / ')}`);
+  return parts.join('\n');
+}
+
+function ctxLine(s) {
+  return s.mediaContext ? `メディア全体の文脈:\n${s.mediaContext}\n` : '';
+}
+
+function fixedThemesFor() {
+  return THEMES.map((t) => ({
     ...t,
+    volumeEstimate: null,
+    estimated: false,
     availablePrimaryInfo: t.usablePrimaryInfoIds.map((id) => PRIMARY_INFO_LIBRARY[id]),
   }));
+}
 
+// 「今、作るべき記事テーマ」をAIが方向性・事業情報・事業ヒアリングから生成する（3.5）。
+// 検索ボリューム・競合は外部データ連携（チェックリストS11）が済むまでAIの推測値。
+async function generateThemes(m) {
+  const infos = businessPrimaryInfo(m);
+  const system = `あなたはSEO戦略コンサルタントです。メディアの方向性（テーマ領域）と事業情報をもとに、「今、作るべき記事テーマ」を3個、優先度の高い順にJSONで提案してください。
+最優先のテーマ領域から最低2個を選び、事業ヒアリングで得た強み・実績が活かせるテーマを優先してください。
+フォーマット: {"themes":[{"title":"記事タイトル案","keyword":"想定キーワード","priority":"高|中|低","reasons":["作るべき理由"],"searchIntent":"想定検索ニーズ","competition":"競合状況の推測","volumeEstimate":"検索ボリュームの推測（大・中・小のいずれか＋一言）","usablePrimaryInfoIds":["使える一次情報のid"],"missingInfoHint":"記事をより独自にするために不足している情報"}]}
+reasonsは2〜4個。usablePrimaryInfoIdsは与えられた一次情報のidのみを使い、無ければ空配列。検索ボリュームと競合は実データがないため推測であることを前提にしてください。`;
+  const user = `${mediaContextText(m)}\n既存メディアの分析結果: ${m.existingAnalysis ? JSON.stringify(m.existingAnalysis) : 'なし'}\n利用できる一次情報: ${JSON.stringify(infos)}`;
+
+  const { data, mode } = await getStructured({
+    system,
+    user,
+    label: 'themes',
+    simulate: () => ({ themes: null }),
+  });
+
+  const raw = Array.isArray(data?.themes) ? data.themes.filter((t) => t && t.title && t.keyword) : [];
+  if (!raw.length) return { themes: fixedThemesFor(), mode: mode === 'ai' ? 'simulated-fallback' : mode };
+
+  const themes = raw.slice(0, 5).map((t, i) => {
+    const ids = (Array.isArray(t.usablePrimaryInfoIds) ? t.usablePrimaryInfoIds : []).filter((id) => infos.some((p) => p.id === id));
+    return {
+      id: `ai_theme${i + 1}`,
+      title: String(t.title),
+      keyword: String(t.keyword),
+      priority: ['高', '中', '低'].includes(t.priority) ? t.priority : '中',
+      reasons: Array.isArray(t.reasons) && t.reasons.length ? t.reasons.map(String) : ['AIが方向性から提案したテーマです'],
+      searchIntent: String(t.searchIntent || ''),
+      competition: String(t.competition || '（推測できませんでした）'),
+      volumeEstimate: String(t.volumeEstimate || ''),
+      estimated: true,
+      usablePrimaryInfoIds: ids,
+      availablePrimaryInfo: infos.filter((p) => ids.includes(p.id)),
+      missingInfoHint: String(t.missingInfoHint || '実際の事例や具体的な数字'),
+    };
+  });
+  return { themes, mode };
+}
+
+app.get('/api/themes', async (req, res) => {
+  let themes = fixedThemesFor();
+  let themesMode = 'fixed';
   let direction = null;
   const mediaId = req.query.mediaId;
   if (mediaId && mediaProfiles.has(mediaId)) {
     const m = mediaProfiles.get(mediaId);
     if (m.topicClusters) {
       direction = { mediaState: m.mediaState, clusters: m.topicClusters, topCluster: topClusterOf(m.topicClusters) };
+      if (AI_ENABLED && (!m.themes || req.query.refresh)) {
+        m.themes = await generateThemes(m);
+      }
+      if (m.themes) {
+        themes = m.themes.themes;
+        themesMode = m.themes.mode;
+      }
     }
   }
 
-  res.json({ themes, aiEnabled: AI_ENABLED, direction });
+  res.json({ themes, themesMode, aiEnabled: AI_ENABLED, direction });
 });
 
 app.post('/api/session', (req, res) => {
-  const { themeId } = req.body || {};
-  const theme = THEMES.find((t) => t.id === themeId);
+  const { themeId, mediaId } = req.body || {};
+  const m = mediaId ? mediaProfiles.get(mediaId) : null;
+  const theme = (m?.themes?.themes || fixedThemesFor()).find((t) => t.id === themeId);
   if (!theme) return res.status(400).json({ error: 'invalid themeId' });
+
+  // テーマ固有の一次情報に、事業ヒアリングで得た強み・実績を加える（固定デモテーマの場合も引き継ぐ）
+  const availablePrimaryInfo = [
+    ...theme.availablePrimaryInfo,
+    ...businessPrimaryInfo(m).filter((p) => !theme.availablePrimaryInfo.some((x) => x.id === p.id)),
+  ];
 
   const sessionId = newId('sess');
   sessions.set(sessionId, {
     id: sessionId,
+    mediaId: m ? m.id : null,
     theme,
-    availablePrimaryInfo: theme.usablePrimaryInfoIds.map((id) => PRIMARY_INFO_LIBRARY[id]),
+    availablePrimaryInfo,
+    mediaContext: mediaContextText(m),
     hearing: { history: [], lastQuestion: null, done: false, maxQuestions: 3 },
     outline: null,
     article: null,
     publishedArticleId: null,
   });
-  res.json({ sessionId, theme, availablePrimaryInfo: theme.usablePrimaryInfoIds.map((id) => PRIMARY_INFO_LIBRARY[id]) });
+  res.json({ sessionId, theme, availablePrimaryInfo });
 });
 
 function getSession(req, res) {
@@ -399,7 +486,7 @@ app.post('/api/hearing/next', async (req, res) => {
   }
 
   const system = 'あなたは日本語のSEO・コンテンツ編集者です。企業独自の一次情報（実績・事例・現場の声）を引き出すための、短く具体的な質問を1つだけJSONで返してください。フォーマット: {"question": "質問文"}';
-  const user = `記事テーマ: ${s.theme.title}\n検索キーワード: ${s.theme.keyword}\n既に登録済みの一次情報: ${s.availablePrimaryInfo.map((p) => `${p.label}: ${p.text}`).join(' / ')}\n不足していると推測される情報: ${s.theme.missingInfoHint}\nこれまでのヒアリング履歴: ${JSON.stringify(s.hearing.history)}\n\n上記を踏まえ、まだ聞いていない、記事の独自性を高めるための質問を1つ生成してください。`;
+  const user = `${ctxLine(s)}記事テーマ: ${s.theme.title}\n検索キーワード: ${s.theme.keyword}\n既に登録済みの一次情報: ${s.availablePrimaryInfo.map((p) => `${p.label}: ${p.text}`).join(' / ')}\n不足していると推測される情報: ${s.theme.missingInfoHint}\nこれまでのヒアリング履歴: ${JSON.stringify(s.hearing.history)}\n\n上記を踏まえ、事業ヒアリングで既に聞いた内容は繰り返さず、まだ聞いていない、記事の独自性を高めるための質問を1つ生成してください。`;
 
   const { data, mode } = await getStructured({
     system,
@@ -420,7 +507,7 @@ app.post('/api/outline', async (req, res) => {
   if (!s) return;
 
   const system = 'あなたは日本語のSEO編集者です。与えられた情報から、検索ユーザーの疑問に答えつつ、企業独自の一次情報を活かした記事構成をJSONで返してください。フォーマット: {"title":"","intro":"導入文","sections":[{"h2":"","h3s":["",""],"summary":"このセクションで書く内容の要約"}]}。sectionsは3〜4個。';
-  const user = `記事テーマ: ${s.theme.title}\nキーワード: ${s.theme.keyword}\n検索意図: ${s.theme.searchIntent}\n一次情報: ${s.availablePrimaryInfo.map((p) => `${p.label}: ${p.text}`).join(' / ')}\nヒアリングで得た情報: ${s.hearing.history.map((h) => `Q:${h.question} A:${h.answer}`).join(' / ') || 'なし'}`;
+  const user = `${ctxLine(s)}記事テーマ: ${s.theme.title}\nキーワード: ${s.theme.keyword}\n検索意図: ${s.theme.searchIntent}\n一次情報: ${s.availablePrimaryInfo.map((p) => `${p.label}: ${p.text}`).join(' / ')}\nヒアリングで得た情報: ${s.hearing.history.map((h) => `Q:${h.question} A:${h.answer}`).join(' / ') || 'なし'}`;
 
   const { data, mode } = await getStructured({
     system,
@@ -465,7 +552,7 @@ app.post('/api/article', async (req, res) => {
  - {"type":"image","role":"inline","alt":"補足図解の説明"}
  - {"type":"cta","text":"相談を促す一言","buttonLabel":"無料相談する"}
 必ずhero画像を1つ、H2ごとに本文paragraphを1つ以上、quoteを最低1つ、listまたはtableを最低1つ、calloutを1つ、末尾にctaを1つ含めてください。`;
-  const user = `記事構成: ${JSON.stringify(s.outline)}\n一次情報: ${s.availablePrimaryInfo.map((p) => `${p.label}: ${p.text}`).join(' / ')}\nヒアリング回答: ${s.hearing.history.map((h) => `Q:${h.question} A:${h.answer}`).join(' / ') || 'なし'}`;
+  const user = `${ctxLine(s)}記事構成: ${JSON.stringify(s.outline)}\n一次情報: ${s.availablePrimaryInfo.map((p) => `${p.label}: ${p.text}`).join(' / ')}\nヒアリング回答: ${s.hearing.history.map((h) => `Q:${h.question} A:${h.answer}`).join(' / ') || 'なし'}`;
 
   const { data, mode } = await getStructured({
     system,
