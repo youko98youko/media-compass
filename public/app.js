@@ -271,23 +271,131 @@ function renderGscConnect() {
           <li>検索クエリ・クリック数・表示回数・掲載順位</li>
           <li>インデックス済みURLの一覧</li>
         </ul>
+        ${state.gscEnabled ? `
+        <div class="info-box" style="margin:10px 0;">
+          <div class="h">連携の流れ</div>「Googleで連携する」を押すとGoogleの認証画面に移動します。Search Consoleの所有者（または権限のあるユーザー）のアカウントでログインし、読み取り専用のアクセスを許可してください。許可後、この画面に戻り、分析するサイトを選びます。
+        </div>
+        <div style="font-size:10.5px;color:var(--sub);margin-bottom:10px;">※読み取り専用です。サイトの設定やデータを変更することはありません。</div>` : `
         <div class="info-box" style="margin:10px 0;">
           <div class="h">連携するアカウント（デモ）</div>demo-owner@example.co.jp
         </div>
-        <div style="font-size:10.5px;color:var(--sub);margin-bottom:10px;">※プロトタイプのため、実際のGoogleアカウントとの連携は行われません。ボタンを押すと連携済みとして次に進みます。</div>
+        <div style="font-size:10.5px;color:var(--sub);margin-bottom:10px;">※実際のGoogleアカウントとの連携は未設定です（Google側の認証情報が登録されるまでデモ表示です）。ボタンを押すと連携済みとして次に進みます。</div>`}
         <div class="btn-row">
-          <button class="btn navy" id="gsc-authorize">連携して続ける →</button>
+          <button class="btn navy" id="gsc-authorize">${state.gscEnabled ? 'Googleで連携する →' : '連携して続ける →'}</button>
           <button class="btn ghost" id="gsc-cancel">← キャンセル</button>
         </div>
       </div>
     </div>
   `, { active: false, nav: false });
-  document.getElementById('gsc-authorize').addEventListener('click', () => {
-    state.gscConnected = true;
-    analyzeExisting();
+  document.getElementById('gsc-authorize').addEventListener('click', async () => {
+    if (!state.gscEnabled) {
+      state.gscConnected = true;
+      analyzeExisting();
+      return;
+    }
+    // Googleの認証画面へ移動する（戻ってきたとき続きから再開できるよう、必要な状態を保存しておく）
+    try {
+      const { url } = await api(`/api/gsc/auth-url?mediaId=${encodeURIComponent(state.mediaId)}`);
+      sessionStorage.setItem('mcGscReturn', JSON.stringify({ mediaId: state.mediaId, mediaState: state.mediaState, siteUrlInput: state.siteUrlInput }));
+      location.href = url;
+    } catch (err) {
+      showFatalError(err);
+    }
   });
   document.getElementById('gsc-cancel').addEventListener('click', () => history.back());
   pushHistory();
+}
+
+// GSC連携後：分析対象のGSCプロパティ（サイト）を選ぶ
+async function renderGscSites() {
+  state.screen = 'gscSites';
+  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>Search Consoleのサイト一覧を取得しています…</div></div>`, { active: false, nav: false });
+  let result;
+  try {
+    result = await api('/api/gsc/sites', { body: { mediaId: state.mediaId, siteUrl: state.siteUrlInput } });
+  } catch (err) {
+    renderGscError('サイト一覧を取得できませんでした。もう一度連携してください');
+    return;
+  }
+  const { account, sites, selected } = result;
+  const preselect = selected || (sites.find((x) => x.matched) || {}).siteUrl || '';
+  const hasMatch = sites.some((x) => x.matched);
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">STEP 0-2 ・ メディア理解（既存）</div>
+        <h1>分析するサイトを選んでください</h1>
+        <p>連携したアカウント${account ? `（${esc(account)}）` : ''}が権限を持つSearch Consoleのサイトです。</p>
+      </div>
+      <div class="card">
+        ${sites.length ? '' : '<div class="missing-box"><div class="h">このアカウントにはSearch Consoleのサイトがありません</div>別のアカウントで連携し直してください。</div>'}
+        ${sites.length && !hasMatch ? `<div class="missing-box"><div class="h">入力したサイト（${esc(state.siteUrlInput || '')}）と一致するサイトが見つかりませんでした</div>分析したいサイトを下から選んでください。</div>` : ''}
+        ${sites.map((x) => `
+          <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:8px;cursor:pointer;">
+            <input type="radio" name="gsc-site" value="${esc(x.siteUrl)}" ${x.siteUrl === preselect ? 'checked' : ''}>
+            <div><div style="font-weight:700;font-size:13px;">${esc(x.siteUrl)} ${x.matched ? '<span class="pill ok">入力サイトと一致</span>' : ''}</div>
+            <div style="font-size:11px;color:var(--sub);">権限：${esc(x.permissionLevel)}</div></div>
+          </label>`).join('')}
+        <div class="btn-row">
+          ${sites.length ? '<button class="btn navy" id="gsc-site-go">このサイトで分析する →</button>' : ''}
+          <button class="btn ghost" id="gsc-disconnect">連携を解除する</button>
+        </div>
+      </div>
+    </div>
+  `, { active: false, nav: false });
+  const go = document.getElementById('gsc-site-go');
+  if (go) go.addEventListener('click', async () => {
+    const picked = app.querySelector('input[name="gsc-site"]:checked');
+    if (!picked) return;
+    await api('/api/gsc/select-site', { body: { mediaId: state.mediaId, siteUrl: picked.value } });
+    state.gscConnected = true;
+    analyzeExisting();
+  });
+  document.getElementById('gsc-disconnect').addEventListener('click', async () => {
+    await api('/api/gsc/disconnect', { body: { mediaId: state.mediaId } });
+    state.gscConnected = false;
+    renderExistingUnderstand();
+  });
+  pushHistory();
+}
+
+function renderGscError(message) {
+  state.screen = 'gscError';
+  state.gscErrorMessage = message;
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">STEP 0-2 ・ メディア理解（既存）</div>
+        <h1>GSCと連携できませんでした</h1>
+      </div>
+      <div class="card">
+        <div class="missing-box"><div class="h">${esc(message)}</div></div>
+        <div class="btn-row">
+          <button class="btn navy" id="gsc-retry">もう一度連携する</button>
+          <button class="btn outline" id="gsc-skip">GSCなしで分析する →</button>
+        </div>
+      </div>
+    </div>
+  `, { active: false, nav: false });
+  document.getElementById('gsc-retry').addEventListener('click', renderGscConnect);
+  document.getElementById('gsc-skip').addEventListener('click', () => { state.gscConnected = false; analyzeExisting(); });
+  pushHistory();
+}
+
+// Googleの認証画面から戻ってきたとき（?gsc=ok / ?gsc=error）、保存しておいた状態を復元して続きを表示する
+function handleGscReturn() {
+  const params = new URLSearchParams(location.search);
+  const result = params.get('gsc');
+  if (!result) return false;
+  let saved = null;
+  try { saved = JSON.parse(sessionStorage.getItem('mcGscReturn') || 'null'); } catch (e) { /* 保存なし */ }
+  history.replaceState(null, '', location.pathname);
+  if (!saved || !saved.mediaId) return false;
+  try { sessionStorage.removeItem('mcGscReturn'); } catch (e) { /* 無視 */ }
+  Object.assign(state, saved);
+  if (result === 'ok') renderGscSites();
+  else renderGscError(params.get('reason') || '連携に失敗しました');
+  return true;
 }
 
 // WordPress接続の疑似的な確認画面（プロトタイプ用の仮実装。実際のWordPressサイトへの接続は行わない）
@@ -398,7 +506,7 @@ function renderExistingAnalysisResult() {
         <h1>分析結果</h1>
         <p>
           ${analysis.real ? `実際にサイト（${esc(analysis.siteUrl)}）を巡回し、AI（ChatGPT）が分析した結果です。` : 'デモ用の固定データによる分析結果です（シミュレーションモード）。'}
-          ${analysis.withGsc ? 'GSC連携の検索クエリはデモ値です。' : 'GSCとは連携していないため、サイトの記事内容のみで分析しています。'}
+          ${analysis.gsc && analysis.gsc.real ? 'Google Search Consoleの実データも使っています。' : analysis.withGsc ? 'GSC連携の検索クエリはデモ値です。' : 'GSCとは連携していないため、サイトの記事内容のみで分析しています。'}
           ${analysis.withWordpress ? 'WordPressとも接続し、記事の見出し構成まで取得しています。' : ''}
         </p>
       </div>
@@ -407,8 +515,15 @@ function renderExistingAnalysisResult() {
           ${analysis.siteSummary ? `<div class="k">メディアの概要</div><div class="v">${esc(analysis.siteSummary)}</div>` : ''}
           ${analysis.industry ? `<div class="k">推定される分野</div><div class="v">${esc(analysis.industry)}</div>` : ''}
           <div class="k">既存記事数</div><div class="v">${analysis.articlesCount}本${analysis.real ? `（サイトの公開情報から推定。うち${analysis.sampledCount}本の内容を分析）` : ''}</div>
-          <div class="k">主な検索クエリ</div><div class="v">${analysis.topQueries.length ? analysis.topQueries.map(esc).join(' / ') + (analysis.real ? ' <span class="pill grey">デモ値</span>' : '') : 'GSC未連携のため取得できません'}</div>
+          <div class="k">主な検索クエリ</div><div class="v">${analysis.topQueries.length ? analysis.topQueries.map(esc).join(' / ') + (analysis.gsc && analysis.gsc.real ? '' : ' <span class="pill grey">デモ値</span>') : 'GSC未連携のため取得できません'}</div>
         </div>
+        ${analysis.gscError ? `<div class="missing-box" style="margin-top:10px;"><div class="h">GSCのデータを取得できませんでした</div>${esc(analysis.gscError)}（GSCなしの分析結果を表示しています）</div>` : ''}
+        ${analysis.gsc && analysis.gsc.real ? `
+        <div class="k" style="font-size:12.5px;font-weight:700;color:var(--sub);margin:14px 0 6px;">Search Consoleの実績（${esc(analysis.gsc.period)}／${esc(analysis.gsc.siteUrl)}）</div>
+        <div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <tr style="text-align:left;color:var(--sub);"><th style="padding:4px 6px;">検索クエリ</th><th>クリック</th><th>表示回数</th><th>CTR</th><th>平均順位</th></tr>
+          ${analysis.gsc.topQueries.slice(0, 10).map((q) => `<tr style="border-top:1px solid var(--line);"><td style="padding:4px 6px;">${esc(q.query)}</td><td>${q.clicks}</td><td>${q.impressions}</td><td>${q.ctr}%</td><td>${q.position}</td></tr>`).join('')}
+        </table></div>` : ''}
         ${analysis.topicsCovered && analysis.topicsCovered.length ? `<div class="info-box" style="margin-top:10px;"><div class="h">扱っているテーマ領域</div>${analysis.topicsCovered.map((t) => `${esc(t.name)}${t.articleCount ? `（${esc(t.articleCount)}本）` : ''}`).join(' / ')}</div>` : ''}
         <div class="missing-box" style="margin-top:10px;">
           <div class="h">カニバリゼーションの兆候</div>
@@ -1273,6 +1388,8 @@ const SCREEN_RENDERERS = {
   mediaState: renderMediaState,
   understandExistingForm: renderExistingUnderstand,
   gscConnect: renderGscConnect,
+  gscSites: renderGscSites,
+  gscError: () => renderGscError(state.gscErrorMessage || ''),
   wordpressConnect: renderWordpressConnect,
   understandExistingResult: renderExistingAnalysisResult,
   crawlError: () => renderCrawlError(state.crawlErrorMessage || ''),
@@ -1305,8 +1422,9 @@ window.addEventListener('popstate', (e) => {
 // 起動時にAI連携の有効/無効を取得してから最初の画面を描画する（バッジの表示を正しくするため）
 (async () => {
   try {
-    const { aiEnabled } = await api('/api/themes');
+    const { aiEnabled, gscEnabled } = await api('/api/themes');
     state.aiEnabled = !!aiEnabled;
+    state.gscEnabled = !!gscEnabled;
   } catch (e) { /* サーバー未接続でも最初の画面は表示する */ }
-  renderMediaState();
+  if (!handleGscReturn()) renderMediaState();
 })();

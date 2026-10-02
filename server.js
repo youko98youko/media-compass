@@ -16,6 +16,7 @@ const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
 const { crawlSite } = require('./crawler');
+const gsc = require('./gsc');
 const crypto = require('crypto');
 
 const app = express();
@@ -241,6 +242,66 @@ app.post('/api/media/state', (req, res) => {
 });
 
 // STEP 0-2a: 既存メディア理解（3.2）
+// ---------------------------------------------------------------
+// Google Search Console 連携（OAuth）。GOOGLE_CLIENT_ID/SECRET 未設定の間は無効で、画面は従来のデモ表示。
+// ---------------------------------------------------------------
+function getMediaByQuery(req, res) {
+  const m = mediaProfiles.get(req.query.mediaId);
+  if (!m) { res.status(404).json({ error: 'media profile not found' }); return null; }
+  return m;
+}
+
+app.get('/api/gsc/auth-url', (req, res) => {
+  if (!gsc.enabled()) return res.status(400).json({ error: 'GSC連携は設定されていません' });
+  const m = getMediaByQuery(req, res);
+  if (!m) return;
+  res.json({ url: gsc.buildAuthUrl(m.id) });
+});
+
+// Googleからのリダイレクト先。成功・失敗とも、画面（SPA）に戻して続きを表示する
+app.get('/api/gsc/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+  const mediaId = gsc.consumeState(String(state || ''));
+  const m = mediaId ? mediaProfiles.get(mediaId) : null;
+  if (!m) return res.redirect('/?gsc=error&reason=' + encodeURIComponent('認証の有効期限が切れました。もう一度お試しください'));
+  if (error || !code) return res.redirect('/?gsc=error&reason=' + encodeURIComponent(error === 'access_denied' ? '連携がキャンセルされました' : '認証に失敗しました'));
+  try {
+    m.gsc = await gsc.exchangeCode(String(code));
+    res.redirect('/?gsc=ok');
+  } catch (e) {
+    console.warn('[GSC連携失敗]', e.message);
+    res.redirect('/?gsc=error&reason=' + encodeURIComponent(e.message));
+  }
+});
+
+app.post('/api/gsc/sites', async (req, res) => {
+  const m = getMediaProfile(req, res);
+  if (!m) return;
+  if (!m.gsc) return res.status(400).json({ error: 'GSC未連携です' });
+  try {
+    const sites = gsc.rankSites(await gsc.listSites(m.gsc), req.body.siteUrl || m.siteUrl || '');
+    res.json({ account: m.gsc.email, selected: m.gsc.siteUrl, sites });
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+app.post('/api/gsc/select-site', (req, res) => {
+  const m = getMediaProfile(req, res);
+  if (!m) return;
+  if (!m.gsc) return res.status(400).json({ error: 'GSC未連携です' });
+  m.gsc.siteUrl = String(req.body.siteUrl || '');
+  res.json({ ok: true });
+});
+
+app.post('/api/gsc/disconnect', async (req, res) => {
+  const m = getMediaProfile(req, res);
+  if (!m) return;
+  if (m.gsc) await gsc.revoke(m.gsc);
+  m.gsc = null;
+  res.json({ ok: true });
+});
+
 // AI連携中は実際にサイトを簡易クロールしてAIで分析する。シミュレーションモード（公開デモ等）では固定のデモ結果を返す。
 // ※GSCは実連携していないため、GSC連携ありの場合の「主な検索クエリ」はデモ値。
 app.post('/api/media/understand-existing', async (req, res) => {
@@ -260,11 +321,21 @@ app.post('/api/media/understand-existing', async (req, res) => {
   if (!crawl.ok) return res.json({ crawlError: crawl.error });
   m.crawl = crawl;
 
+  // GSCを実連携済みなら、検索実績（過去28日）も取得して分析に加える。失敗してもクロールのみで続行する。
+  let gscSummary = null;
+  let gscError = null;
+  if (withGsc && gsc.enabled() && m.gsc?.siteUrl) {
+    try { gscSummary = await gsc.fetchSummary(m.gsc); } catch (e) { gscError = e.message; console.warn('[GSCデータ取得失敗]', e.message); }
+  }
+  const gscText = gscSummary
+    ? `\n\nGoogle Search Consoleの実績（${gscSummary.period}）:\n上位クエリ: ${gscSummary.topQueries.slice(0, 15).map((q) => `${q.query}(クリック${q.clicks}/表示${q.impressions}/順位${q.position})`).join(' ; ')}\nページ別: ${gscSummary.topPages.slice(0, 15).map((p) => `${p.page}(クリック${p.clicks}/順位${p.position})`).join(' ; ')}\n同じクエリで複数ページが表示されている候補: ${gscSummary.cannibalCandidates.map((c) => `「${c.query}」→${c.pages.map((p) => `${p.page}(順位${p.position})`).join(' と ')}`).join(' ; ') || 'なし'}`
+    : '';
+
   const pagesText = crawl.pages.map((p, i) => `[${i + 1}] ${p.title}\n  見出し: ${p.h2.join(' / ') || '(取得できず)'}${p.description ? `\n  説明: ${p.description}` : ''}`).join('\n');
   const system = `あなたはSEO戦略コンサルタントです。既存メディアのサイトから取得した記事のタイトル・見出しをもとに、メディアの現状をJSONで分析してください。
 フォーマット: {"siteSummary":"このメディアが何を扱い、誰向けかの要約（80字程度）","industry":"推定される業種・分野","topicsCovered":[{"name":"扱っているテーマ領域","articleCount":数値}],"cannibalization":[{"topic":"競合しているテーマ","articles":["記事タイトル","記事タイトル"]}],"coverageNote":"カバレッジの傾向（厚い領域／手薄・未着手の領域）を2〜3文で","gaps":["未着手と思われるテーマ"]}
-注意: 取得できたのは記事の一部（サンプル）のみです。サンプルから分かる範囲で述べ、断定しすぎないでください。カニバリゼーションはタイトルや見出しが重複・近接する記事が実際にある場合のみ挙げ、無ければ空配列にしてください。`;
-  const user = `サイト: ${crawl.origin}\nサイト全体の推定記事数: ${crawl.articlesCount}本（うち${crawl.sampledCount}本を取得）\n${pagesText}`;
+注意: 取得できたのは記事の一部（サンプル）のみです。サンプルから分かる範囲で述べ、断定しすぎないでください。カニバリゼーションはタイトルや見出しが重複・近接する記事が実際にある場合のみ挙げ、無ければ空配列にしてください。Search Consoleの実績が与えられている場合は、検索クエリの傾向をカバレッジの判断に使い、「同じクエリで複数ページが表示されている候補」をカニバリゼーションの根拠として優先してください（topicには検索クエリ、articlesにはページURLを使ってよい）。`;
+  const user = `サイト: ${crawl.origin}\nサイト全体の推定記事数: ${crawl.articlesCount}本（うち${crawl.sampledCount}本を取得）\n${pagesText}${gscText}`;
 
   const { data, mode } = await getStructured({
     system,
@@ -289,8 +360,10 @@ app.post('/api/media/understand-existing', async (req, res) => {
     cannibalization: Array.isArray(data.cannibalization) ? data.cannibalization : [],
     coverageNote: data.coverageNote || '',
     gaps: Array.isArray(data.gaps) ? data.gaps : [],
-    // GSCは実連携していないため、連携ありの場合もデモ値であることを画面で明示する
-    topQueries: withGsc ? buildExistingAnalysis(true, false).topQueries : [],
+    // 実連携済みなら実データ。未設定のデモ連携の場合はデモ値であることを画面で明示する
+    gsc: gscSummary,
+    gscError,
+    topQueries: gscSummary ? gscSummary.topQueries.slice(0, 5).map((q) => q.query) : withGsc ? buildExistingAnalysis(true, false).topQueries : [],
     headingSample: crawl.pages.slice(0, 3).map((p) => ({ title: p.title, headings: p.h2.slice(0, 6).map((h) => `H2：${h}`) })),
   };
   m.existingAnalysis = analysis;
@@ -475,7 +548,7 @@ app.get('/api/themes', async (req, res) => {
     }
   }
 
-  res.json({ themes, themesMode, aiEnabled: AI_ENABLED, direction });
+  res.json({ themes, themesMode, aiEnabled: AI_ENABLED, gscEnabled: gsc.enabled(), direction });
 });
 
 app.post('/api/session', (req, res) => {
