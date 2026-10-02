@@ -15,6 +15,7 @@
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
+const { crawlSite } = require('./crawler');
 const crypto = require('crypto');
 
 const app = express();
@@ -240,12 +241,58 @@ app.post('/api/media/state', (req, res) => {
 });
 
 // STEP 0-2a: 既存メディア理解（3.2）
-app.post('/api/media/understand-existing', (req, res) => {
+// AI連携中は実際にサイトを簡易クロールしてAIで分析する。シミュレーションモード（公開デモ等）では固定のデモ結果を返す。
+// ※GSCは実連携していないため、GSC連携ありの場合の「主な検索クエリ」はデモ値。
+app.post('/api/media/understand-existing', async (req, res) => {
   const m = getMediaProfile(req, res);
   if (!m) return;
-  const { siteUrl, withGsc, withWordpress } = req.body || {};
+  const { siteUrl, withGsc, withWordpress, useDemo } = req.body || {};
   m.siteUrl = siteUrl || '(未入力)';
-  const analysis = buildExistingAnalysis(!!withGsc, !!withWordpress);
+  m.crawl = null;
+
+  if (!AI_ENABLED || useDemo) {
+    const analysis = { ...buildExistingAnalysis(!!withGsc, !!withWordpress), real: false };
+    m.existingAnalysis = analysis;
+    return res.json({ analysis });
+  }
+
+  const crawl = await crawlSite(siteUrl);
+  if (!crawl.ok) return res.json({ crawlError: crawl.error });
+  m.crawl = crawl;
+
+  const pagesText = crawl.pages.map((p, i) => `[${i + 1}] ${p.title}\n  見出し: ${p.h2.join(' / ') || '(取得できず)'}${p.description ? `\n  説明: ${p.description}` : ''}`).join('\n');
+  const system = `あなたはSEO戦略コンサルタントです。既存メディアのサイトから取得した記事のタイトル・見出しをもとに、メディアの現状をJSONで分析してください。
+フォーマット: {"siteSummary":"このメディアが何を扱い、誰向けかの要約（80字程度）","industry":"推定される業種・分野","topicsCovered":[{"name":"扱っているテーマ領域","articleCount":数値}],"cannibalization":[{"topic":"競合しているテーマ","articles":["記事タイトル","記事タイトル"]}],"coverageNote":"カバレッジの傾向（厚い領域／手薄・未着手の領域）を2〜3文で","gaps":["未着手と思われるテーマ"]}
+注意: 取得できたのは記事の一部（サンプル）のみです。サンプルから分かる範囲で述べ、断定しすぎないでください。カニバリゼーションはタイトルや見出しが重複・近接する記事が実際にある場合のみ挙げ、無ければ空配列にしてください。`;
+  const user = `サイト: ${crawl.origin}\nサイト全体の推定記事数: ${crawl.articlesCount}本（うち${crawl.sampledCount}本を取得）\n${pagesText}`;
+
+  const { data, mode } = await getStructured({
+    system,
+    user,
+    label: 'understand-existing',
+    simulate: () => ({ siteSummary: '', industry: '', topicsCovered: [], cannibalization: [], coverageNote: '（AIによる分析に失敗したため、取得結果のみ表示しています）', gaps: [] }),
+  });
+
+  const analysis = {
+    real: true,
+    mode,
+    withGsc: !!withGsc,
+    withWordpress: !!withWordpress,
+    siteUrl: crawl.origin,
+    articlesCount: crawl.articlesCount,
+    sampledCount: crawl.sampledCount,
+    discoveredBy: crawl.discoveredBy,
+    fetchNotes: crawl.notes,
+    siteSummary: data.siteSummary || '',
+    industry: data.industry || '',
+    topicsCovered: Array.isArray(data.topicsCovered) ? data.topicsCovered : [],
+    cannibalization: Array.isArray(data.cannibalization) ? data.cannibalization : [],
+    coverageNote: data.coverageNote || '',
+    gaps: Array.isArray(data.gaps) ? data.gaps : [],
+    // GSCは実連携していないため、連携ありの場合もデモ値であることを画面で明示する
+    topQueries: withGsc ? buildExistingAnalysis(true, false).topQueries : [],
+    headingSample: crawl.pages.slice(0, 3).map((p) => ({ title: p.title, headings: p.h2.slice(0, 6).map((h) => `H2：${h}`) })),
+  };
   m.existingAnalysis = analysis;
   res.json({ analysis });
 });
@@ -304,7 +351,7 @@ app.post('/api/media/direction', async (req, res) => {
 
   const system = 'あなたはSEO戦略コンサルタントです。与えられた情報から、このメディアが扱うべきテーマ領域（TopicCluster）を3〜5個、優先度・カバレッジ状況とともにJSONで提案してください。フォーマット: {"clusters":[{"name":"","priority":"高|中|低","coverage":"未着手|一部|十分","reason":""}]}';
   const user = m.mediaState === 'existing'
-    ? `既存メディアの分析結果: ${JSON.stringify(m.existingAnalysis)}`
+    ? `既存メディアの分析結果: ${JSON.stringify(m.existingAnalysis)}${existingTitlesText(m)}`
     : `業種: ${m.businessInfo?.industry}\n商圏: ${m.businessInfo?.area}\n事業理解ヒアリング: ${m.hearing.history.map((h) => `Q:${h.question} A:${h.answer}`).join(' / ')}`;
 
   const { data, mode } = await getStructured({
@@ -343,10 +390,17 @@ function businessPrimaryInfo(m) {
 function mediaContextText(m) {
   if (!m) return '';
   const parts = [];
+  if (m.existingAnalysis?.real) parts.push(`既存メディア: ${m.existingAnalysis.siteUrl}（${m.existingAnalysis.industry}）${m.existingAnalysis.siteSummary}`);
   if (m.businessInfo) parts.push(`業種: ${m.businessInfo.industry} / 商圏: ${m.businessInfo.area}`);
   if (m.topicClusters) parts.push(`メディアの方向性（テーマ領域）: ${m.topicClusters.map((c) => `${c.name}(優先度${c.priority})`).join('、')}`);
   if (m.hearing.history.length) parts.push(`事業の強み・実績（事業ヒアリング）: ${m.hearing.history.map((h) => h.answer).join(' / ')}`);
   return parts.join('\n');
+}
+
+// 実クロールした既存記事のタイトル一覧（テーマ・方向性で既存記事と重複しないために使う）
+function existingTitlesText(m) {
+  if (!m?.crawl?.pages?.length) return '';
+  return `\n既存記事（取得できたサンプル）: ${m.crawl.pages.map((p) => p.title).join(' / ')}`;
 }
 
 function ctxLine(s) {
@@ -370,7 +424,7 @@ async function generateThemes(m) {
 最優先のテーマ領域から最低2個を選び、事業ヒアリングで得た強み・実績が活かせるテーマを優先してください。
 フォーマット: {"themes":[{"title":"記事タイトル案","keyword":"想定キーワード","priority":"高|中|低","reasons":["作るべき理由"],"searchIntent":"想定検索ニーズ","competition":"競合状況の推測","volumeEstimate":"検索ボリュームの推測（大・中・小のいずれか＋一言）","usablePrimaryInfoIds":["使える一次情報のid"],"missingInfoHint":"記事をより独自にするために不足している情報"}]}
 reasonsは2〜4個。usablePrimaryInfoIdsは与えられた一次情報のidのみを使い、無ければ空配列。検索ボリュームと競合は実データがないため推測であることを前提にしてください。`;
-  const user = `${mediaContextText(m)}\n既存メディアの分析結果: ${m.existingAnalysis ? JSON.stringify(m.existingAnalysis) : 'なし'}\n利用できる一次情報: ${JSON.stringify(infos)}`;
+  const user = `${mediaContextText(m)}\n既存メディアの分析結果: ${m.existingAnalysis ? JSON.stringify(m.existingAnalysis) : 'なし'}${existingTitlesText(m)}\n利用できる一次情報: ${JSON.stringify(infos)}`;
 
   const { data, mode } = await getStructured({
     system,

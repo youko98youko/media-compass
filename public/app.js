@@ -340,7 +340,7 @@ function renderWordpressConnect() {
   pushHistory();
 }
 
-async function analyzeExisting() {
+async function analyzeExisting(useDemo = false) {
   const siteUrl = state.siteUrlInput || 'https://example.co.jp';
   const withGsc = !!state.gscConnected;
   const withWordpress = !!state.wordpressConnected;
@@ -348,16 +348,44 @@ async function analyzeExisting() {
   if (withGsc) loadingMsgs.push('検索順位・GSCデータ');
   if (withWordpress) loadingMsgs.push('WordPressの記事・見出し構成');
   loadingMsgs.push('サイト構成');
-  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>${loadingMsgs.join('・')}を分析しています…</div></div>`, { active: false, nav: false });
-  let analysis;
+  const crawlNote = state.aiEnabled && !useDemo ? '<br><span style="font-size:11.5px;color:var(--sub);">実際にサイトを巡回して記事を読み取るため、30秒〜1分ほどかかります</span>' : '';
+  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>${loadingMsgs.join('・')}を分析しています…${crawlNote}</div></div>`, { active: false, nav: false });
+  let analysis, crawlError;
   try {
-    ({ analysis } = await api('/api/media/understand-existing', { body: { mediaId: state.mediaId, siteUrl, withGsc, withWordpress } }));
+    ({ analysis, crawlError } = await api('/api/media/understand-existing', { body: { mediaId: state.mediaId, siteUrl, withGsc, withWordpress, useDemo } }));
   } catch (err) {
     showFatalError(err);
     return;
   }
+  if (crawlError) {
+    renderCrawlError(crawlError);
+    return;
+  }
   state.existingAnalysis = analysis;
   renderExistingAnalysisResult();
+}
+
+function renderCrawlError(message) {
+  state.screen = 'crawlError';
+  state.crawlErrorMessage = message;
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">STEP 0-2 ・ メディア理解（既存）</div>
+        <h1>サイトを分析できませんでした</h1>
+      </div>
+      <div class="card">
+        <div class="missing-box"><div class="h">${esc(message)}</div>URLをご確認のうえ、もう一度お試しください。</div>
+        <div class="btn-row">
+          <button class="btn navy" id="crawl-retry">← URLを入力し直す</button>
+          <button class="btn outline" id="crawl-demo">デモ用の分析結果で続ける →</button>
+        </div>
+      </div>
+    </div>
+  `, { active: false, nav: false });
+  document.getElementById('crawl-retry').addEventListener('click', renderExistingUnderstand);
+  document.getElementById('crawl-demo').addEventListener('click', () => analyzeExisting(true));
+  pushHistory();
 }
 
 function renderExistingAnalysisResult() {
@@ -369,24 +397,30 @@ function renderExistingAnalysisResult() {
         <div class="eyebrow">STEP 0-2 ・ メディア理解（既存）</div>
         <h1>分析結果</h1>
         <p>
-          ${analysis.withGsc ? 'Google Search Consoleと連携した分析結果です。' : 'GSCとは連携せず、サイトの簡易クロールのみで分析した結果です。'}
+          ${analysis.real ? `実際にサイト（${esc(analysis.siteUrl)}）を巡回し、AI（ChatGPT）が分析した結果です。` : 'デモ用の固定データによる分析結果です（シミュレーションモード）。'}
+          ${analysis.withGsc ? 'GSC連携の検索クエリはデモ値です。' : 'GSCとは連携していないため、サイトの記事内容のみで分析しています。'}
           ${analysis.withWordpress ? 'WordPressとも接続し、記事の見出し構成まで取得しています。' : ''}
         </p>
       </div>
       <div class="card">
         <div class="field-grid">
-          <div class="k">既存記事数</div><div class="v">${analysis.articlesCount}本</div>
-          <div class="k">主な検索クエリ</div><div class="v">${analysis.topQueries.length ? analysis.topQueries.map(esc).join(' / ') : 'GSC未連携のため取得できません'}</div>
+          ${analysis.siteSummary ? `<div class="k">メディアの概要</div><div class="v">${esc(analysis.siteSummary)}</div>` : ''}
+          ${analysis.industry ? `<div class="k">推定される分野</div><div class="v">${esc(analysis.industry)}</div>` : ''}
+          <div class="k">既存記事数</div><div class="v">${analysis.articlesCount}本${analysis.real ? `（サイトの公開情報から推定。うち${analysis.sampledCount}本の内容を分析）` : ''}</div>
+          <div class="k">主な検索クエリ</div><div class="v">${analysis.topQueries.length ? analysis.topQueries.map(esc).join(' / ') + (analysis.real ? ' <span class="pill grey">デモ値</span>' : '') : 'GSC未連携のため取得できません'}</div>
         </div>
+        ${analysis.topicsCovered && analysis.topicsCovered.length ? `<div class="info-box" style="margin-top:10px;"><div class="h">扱っているテーマ領域</div>${analysis.topicsCovered.map((t) => `${esc(t.name)}${t.articleCount ? `（${esc(t.articleCount)}本）` : ''}`).join(' / ')}</div>` : ''}
         <div class="missing-box" style="margin-top:10px;">
           <div class="h">カニバリゼーションの兆候</div>
-          ${analysis.cannibalization.map((c) => `「${esc(c.topic)}」で複数記事が競合：${c.articles.map(esc).join(' と ')}`).join('<br>')}
+          ${analysis.cannibalization.length ? analysis.cannibalization.map((c) => `「${esc(c.topic)}」で複数記事が競合：${c.articles.map(esc).join(' と ')}`).join('<br>') : '明確な兆候は見つかりませんでした'}
         </div>
         <div class="info-box" style="margin-top:10px;">
           <div class="h">カバレッジの傾向</div>${esc(analysis.coverageNote)}
+          ${analysis.gaps && analysis.gaps.length ? `<div style="margin-top:6px;"><b>未着手と思われるテーマ：</b>${analysis.gaps.map(esc).join(' / ')}</div>` : ''}
         </div>
+        ${analysis.fetchNotes && analysis.fetchNotes.length ? `<div style="font-size:11px;color:var(--sub);margin-top:8px;">※${analysis.fetchNotes.map(esc).join('<br>※')}</div>` : ''}
         ${analysis.headingSample ? `
-        <div class="k" style="font-size:12.5px;font-weight:700;color:var(--sub);margin:14px 0 6px;">WordPressから取得した見出し構成（サンプル）</div>
+        <div class="k" style="font-size:12.5px;font-weight:700;color:var(--sub);margin:14px 0 6px;">${analysis.real ? 'サイトから取得した見出し構成（サンプル）' : 'WordPressから取得した見出し構成（サンプル）'}</div>
         ${analysis.headingSample.map((a) => `
           <div class="outline-item">
             <div class="h2">${esc(a.title)}</div>
@@ -1241,6 +1275,7 @@ const SCREEN_RENDERERS = {
   gscConnect: renderGscConnect,
   wordpressConnect: renderWordpressConnect,
   understandExistingResult: renderExistingAnalysisResult,
+  crawlError: () => renderCrawlError(state.crawlErrorMessage || ''),
   understandNewForm: renderNewBusinessForm,
   understandNewHearing: renderNewHearing,
   directionConfirm: renderDirectionConfirm,
