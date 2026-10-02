@@ -153,7 +153,7 @@ function shell(innerHtml, { active = true, nav = true } = {}) {
     <div class="appbar">
       <span class="brand">メディアコンパス極</span>
       ${navHtml}
-      <span class="mode-badge ${state.aiEnabled ? 'ai' : 'sim'}"><span class="dot"></span>${state.aiEnabled ? 'AI連携中（Claude）' : 'シミュレーションモード'}</span>
+      <span class="mode-badge ${state.aiEnabled ? 'ai' : 'sim'}"><span class="dot"></span>${state.aiEnabled ? 'AI連携中（ChatGPT）' : 'シミュレーションモード'}</span>
     </div>
     ${stepperHtml}
     ${innerHtml}

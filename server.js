@@ -5,17 +5,17 @@
 //
 // 起動方法:
 //   1) npm install
-//   2) .env.example を .env にコピーし、必要なら ANTHROPIC_API_KEY を設定
+//   2) .env.example を .env にコピーし、必要なら OPENAI_API_KEY を設定
 //   3) npm start
 //   4) http://localhost:3000 を開く
 //
-// ANTHROPIC_API_KEY が未設定でも「シミュレーションモード」で全ステップを最後まで
+// OPENAI_API_KEY が未設定でも「シミュレーションモード」で全ステップを最後まで
 // 操作できます（AI呼び出しの代わりにテンプレート応答を返します。回答内容は反映されます）。
 
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
 const crypto = require('crypto');
-const path = require('path');
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -25,8 +25,8 @@ app.get('/', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-const MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-5';
-const AI_ENABLED = !!process.env.ANTHROPIC_API_KEY;
+const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
+const AI_ENABLED = !!process.env.OPENAI_API_KEY;
 
 // ---------------------------------------------------------------
 // デモ用の仮想企業ペルソナ・一次情報・テーマ候補（UX検証用の仮データ）
@@ -149,29 +149,31 @@ function newId(prefix) {
 }
 
 // ---------------------------------------------------------------
-// AI 呼び出し（Anthropic Messages API）。未設定時はシミュレーションへフォールバック。
+// AI 呼び出し（OpenAI Chat Completions API）。未設定時はシミュレーションへフォールバック。
 // ---------------------------------------------------------------
-async function callClaude(systemPrompt, userPrompt) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+async function callOpenAI(systemPrompt, userPrompt) {
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-api-key': process.env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
+      authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
     },
     body: JSON.stringify({
       model: MODEL,
-      max_tokens: 2000,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
+      max_tokens: 6000,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
     }),
   });
   if (!res.ok) {
     const t = await res.text().catch(() => '');
-    throw new Error(`Anthropic API error ${res.status}: ${t.slice(0, 300)}`);
+    throw new Error(`OpenAI API error ${res.status}: ${t.slice(0, 300)}`);
   }
   const data = await res.json();
-  return (data.content || []).map((c) => c.text || '').join('\n');
+  return data.choices?.[0]?.message?.content || '';
 }
 
 function extractJSON(text) {
@@ -194,7 +196,7 @@ function extractJSON(text) {
 async function getStructured({ system, user, simulate, label }) {
   if (AI_ENABLED) {
     try {
-      const raw = await callClaude(system, user);
+      const raw = await callOpenAI(system, user);
       return { data: extractJSON(raw), mode: 'ai' };
     } catch (err) {
       console.warn(`[AI呼び出し失敗・シミュレーションにフォールバック: ${label}]`, err.message);
