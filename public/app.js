@@ -248,15 +248,56 @@ function renderExistingUnderstand() {
   pushHistory();
 }
 
-// GSC連携の疑似的な確認画面（プロトタイプ用の仮実装。実際のGoogleアカウント連携は行わない）
-function renderGscConnect() {
+// GSC連携画面。実際にGoogle Search Consoleと連携する。
+// 連携にはGoogle Cloudで発行したOAuthクライアント（クライアントID・シークレット）が必要なため、
+// サーバーに設定されていなければ、この画面で入力してもらう。入力しなくても「デモで続ける」で体験できる。
+async function renderGscConnect() {
   state.screen = 'gscConnect';
+  let info;
+  try {
+    info = await api('/api/gsc/info');
+  } catch (e) {
+    info = { serverConfigured: false, redirectUri: `${location.origin}/api/gsc/callback` };
+  }
+  const isLocal = ['localhost', '127.0.0.1'].includes(location.hostname);
+  const input = 'width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;box-sizing:border-box;';
+
+  const setup = info.serverConfigured ? `
+        <div class="info-box" style="margin:10px 0;">
+          <div class="h">連携の流れ</div>「Googleで連携する」を押すとGoogleの認証画面に移動します。Search Consoleの所有者（または権限のあるユーザー）のアカウントでログインし、読み取り専用のアクセスを許可してください。許可後、この画面に戻り、分析するサイトを選びます。
+        </div>
+        <div style="font-size:10.5px;color:var(--sub);margin-bottom:10px;">※読み取り専用です。サイトの設定やデータを変更することはありません。</div>` : `
+        <div class="info-box" style="margin:10px 0;">
+          <div class="h">連携に必要な情報</div>Google Cloudで発行する「OAuthクライアント」の、クライアントIDとクライアントシークレットが必要です。まだ発行していない場合は、下の手順で発行してください。
+        </div>
+        <details style="margin:10px 0;">
+          <summary style="cursor:pointer;font-size:12.5px;font-weight:700;color:var(--sub);">発行の手順（約10分）</summary>
+          <ol style="font-size:12.5px;line-height:1.8;margin:8px 0 0 18px;padding:0;">
+            <li><a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud Console</a>でプロジェクトを作成し、「Google Search Console API」を有効にする。</li>
+            <li>「APIとサービス」→「OAuth同意画面」を設定する（ユーザーの種類は「外部」。スコープは webmasters.readonly・openid・email。「テストユーザー」に、連携に使うGoogleアカウントを登録）。</li>
+            <li>「認証情報」→「認証情報を作成」→「OAuthクライアントID」を選ぶ。種類は「ウェブアプリケーション」。</li>
+            <li>「承認済みのリダイレクトURI」に、下の「登録するリダイレクトURI」を<b>そのまま</b>登録する。</li>
+            <li>作成後に表示される「クライアントID」と「クライアントシークレット」を、下の欄に入力する。</li>
+          </ol>
+        </details>
+        <div class="k" style="font-size:12.5px;font-weight:700;color:var(--sub);margin:12px 0 4px;">登録するリダイレクトURI（Google Cloudに登録する値）</div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
+          <code id="gsc-redirect" style="flex:1;padding:8px 10px;background:#f5f7fa;border-radius:8px;font-size:12.5px;word-break:break-all;user-select:all;">${esc(info.redirectUri)}</code>
+          <button class="btn outline small" id="gsc-copy" type="button">コピー</button>
+        </div>
+        <div class="field-grid">
+          <div class="k">クライアントID</div><div class="v"><input id="gsc-client-id" type="text" autocomplete="off" placeholder="1234567890-xxxx.apps.googleusercontent.com" style="${input}"></div>
+          <div class="k">クライアントシークレット</div><div class="v"><input id="gsc-client-secret" type="password" autocomplete="off" placeholder="GOCSPX-xxxx" style="${input}"></div>
+        </div>
+        <div style="font-size:10.5px;color:var(--sub);margin:8px 0 4px;">※入力した情報は、この連携のためにサーバーのメモリ上にだけ保持します（ブラウザには保存せず、サーバーを再起動すると消えます）。権限は読み取り専用で、サイトの設定やデータは変更しません。</div>
+        ${isLocal ? '' : '<div class="missing-box" style="margin:8px 0;"><div class="h">このサイトは誰でもアクセスできる公開環境です</div>クライアントシークレットは秘密の情報です。公開環境での入力はおすすめしません。実際の連携は、ご自身のパソコンで動かすプロトタイプ（localhost:3000）で行ってください。</div>'}`;
+
   shell(`
     <div class="wrap">
       <div class="screen-head">
         <div class="eyebrow">STEP 0-2 ・ メディア理解（既存）</div>
         <h1>Google Search Console と連携します</h1>
-        <p>連携すると、検索クエリ・掲載順位・インデックス済みURLなどのデータを取得できます。</p>
+        <p>連携すると、検索クエリ・掲載順位・ページ別の実績などのデータを取得できます。</p>
       </div>
       <div class="card">
         <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:14px;">
@@ -268,38 +309,47 @@ function renderGscConnect() {
         </div>
         <div class="k" style="font-size:12.5px;font-weight:700;color:var(--sub);margin-bottom:6px;">連携すると取得できるデータ</div>
         <ul class="reason-list">
-          <li>検索クエリ・クリック数・表示回数・掲載順位</li>
-          <li>インデックス済みURLの一覧</li>
+          <li>検索クエリ・クリック数・表示回数・掲載順位（過去28日）</li>
+          <li>ページ別の実績、同じクエリで複数ページが表示されている候補（カニバリゼーションの兆候）</li>
         </ul>
-        ${state.gscEnabled ? `
-        <div class="info-box" style="margin:10px 0;">
-          <div class="h">連携の流れ</div>「Googleで連携する」を押すとGoogleの認証画面に移動します。Search Consoleの所有者（または権限のあるユーザー）のアカウントでログインし、読み取り専用のアクセスを許可してください。許可後、この画面に戻り、分析するサイトを選びます。
-        </div>
-        <div style="font-size:10.5px;color:var(--sub);margin-bottom:10px;">※読み取り専用です。サイトの設定やデータを変更することはありません。</div>` : `
-        <div class="info-box" style="margin:10px 0;">
-          <div class="h">連携するアカウント（デモ）</div>demo-owner@example.co.jp
-        </div>
-        <div style="font-size:10.5px;color:var(--sub);margin-bottom:10px;">※実際のGoogleアカウントとの連携は未設定です（Google側の認証情報が登録されるまでデモ表示です）。ボタンを押すと連携済みとして次に進みます。</div>`}
+        ${setup}
+        <div id="gsc-error" style="color:var(--danger);font-size:12.5px;margin:6px 0;"></div>
         <div class="btn-row">
-          <button class="btn navy" id="gsc-authorize">${state.gscEnabled ? 'Googleで連携する →' : '連携して続ける →'}</button>
+          <button class="btn navy" id="gsc-authorize">Googleで連携する →</button>
+          ${info.serverConfigured ? '' : '<button class="btn outline" id="gsc-demo">デモで続ける（実際には連携しない）</button>'}
           <button class="btn ghost" id="gsc-cancel">← キャンセル</button>
         </div>
       </div>
     </div>
   `, { active: false, nav: false });
+
+  const copyBtn = document.getElementById('gsc-copy');
+  if (copyBtn) copyBtn.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(info.redirectUri); copyBtn.textContent = 'コピーしました'; } catch (e) { copyBtn.textContent = '選択してコピーしてください'; }
+  });
+  const demoBtn = document.getElementById('gsc-demo');
+  if (demoBtn) demoBtn.addEventListener('click', () => {
+    state.gscConnected = true;
+    analyzeExisting();
+  });
   document.getElementById('gsc-authorize').addEventListener('click', async () => {
-    if (!state.gscEnabled) {
-      state.gscConnected = true;
-      analyzeExisting();
-      return;
+    const errEl = document.getElementById('gsc-error');
+    errEl.textContent = '';
+    const clientIdEl = document.getElementById('gsc-client-id');
+    const body = { mediaId: state.mediaId };
+    if (clientIdEl) {
+      body.clientId = clientIdEl.value;
+      body.clientSecret = document.getElementById('gsc-client-secret').value;
     }
-    // Googleの認証画面へ移動する（戻ってきたとき続きから再開できるよう、必要な状態を保存しておく）
+    // Googleの認証画面へ移動する（戻ってきたとき続きから再開できるよう、必要な状態を保存しておく。シークレットは保存しない）
     try {
-      const { url } = await api(`/api/gsc/auth-url?mediaId=${encodeURIComponent(state.mediaId)}`);
+      const res = await fetch('/api/gsc/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { errEl.textContent = data.error || '連携を開始できませんでした'; return; }
       sessionStorage.setItem('mcGscReturn', JSON.stringify({ mediaId: state.mediaId, mediaState: state.mediaState, siteUrlInput: state.siteUrlInput }));
-      location.href = url;
+      location.href = data.url;
     } catch (err) {
-      showFatalError(err);
+      errEl.textContent = 'サーバーに接続できませんでした';
     }
   });
   document.getElementById('gsc-cancel').addEventListener('click', () => history.back());

@@ -20,6 +20,7 @@ const gsc = require('./gsc');
 const crypto = require('crypto');
 
 const app = express();
+app.set('trust proxy', true); // Render等のプロキシ配下でも、https/ホスト名を正しく取得する（GSC連携のリダイレクトURI用）
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/', (req, res) => {
@@ -251,11 +252,25 @@ function getMediaByQuery(req, res) {
   return m;
 }
 
-app.get('/api/gsc/auth-url', (req, res) => {
-  if (!gsc.enabled()) return res.status(400).json({ error: 'GSC連携は設定されていません' });
-  const m = getMediaByQuery(req, res);
+// 連携画面に表示する情報：サーバー側に認証情報が設定済みか、Google Cloudに登録すべきリダイレクトURI
+app.get('/api/gsc/info', (req, res) => {
+  res.json({ serverConfigured: gsc.enabled(), redirectUri: gsc.redirectUriFor(req) });
+});
+
+// 連携の開始：画面で入力された認証情報（またはサーバー設定）で、Googleの認証画面のURLを返す。
+// 入力されたシークレットはこのメディアのメモリ上にのみ保持し、画面には返さない。
+app.post('/api/gsc/start', (req, res) => {
+  const m = getMediaProfile(req, res);
   if (!m) return;
-  res.json({ url: gsc.buildAuthUrl(m.id) });
+  const { clientId, clientSecret } = req.body || {};
+  try {
+    const cfg = clientId || clientSecret ? gsc.configFromInput(req, clientId, clientSecret) : gsc.envConfig(req);
+    if (!cfg) return res.status(400).json({ error: 'クライアントIDとクライアントシークレットを入力してください' });
+    m.gscCfg = cfg;
+    res.json({ url: gsc.buildAuthUrl(cfg, m.id) });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
 });
 
 // Googleからのリダイレクト先。成功・失敗とも、画面（SPA）に戻して続きを表示する
@@ -266,7 +281,8 @@ app.get('/api/gsc/callback', async (req, res) => {
   if (!m) return res.redirect('/?gsc=error&reason=' + encodeURIComponent('認証の有効期限が切れました。もう一度お試しください'));
   if (error || !code) return res.redirect('/?gsc=error&reason=' + encodeURIComponent(error === 'access_denied' ? '連携がキャンセルされました' : '認証に失敗しました'));
   try {
-    m.gsc = await gsc.exchangeCode(String(code));
+    if (!m.gscCfg) throw new Error('認証情報が見つかりません。もう一度、連携をやり直してください');
+    m.gsc = await gsc.exchangeCode(m.gscCfg, String(code));
     res.redirect('/?gsc=ok');
   } catch (e) {
     console.warn('[GSC連携失敗]', e.message);
@@ -299,6 +315,7 @@ app.post('/api/gsc/disconnect', async (req, res) => {
   if (!m) return;
   if (m.gsc) await gsc.revoke(m.gsc);
   m.gsc = null;
+  m.gscCfg = null;
   res.json({ ok: true });
 });
 
@@ -324,7 +341,7 @@ app.post('/api/media/understand-existing', async (req, res) => {
   // GSCを実連携済みなら、検索実績（過去28日）も取得して分析に加える。失敗してもクロールのみで続行する。
   let gscSummary = null;
   let gscError = null;
-  if (withGsc && gsc.enabled() && m.gsc?.siteUrl) {
+  if (withGsc && m.gsc?.siteUrl) {
     try { gscSummary = await gsc.fetchSummary(m.gsc); } catch (e) { gscError = e.message; console.warn('[GSCデータ取得失敗]', e.message); }
   }
   const gscText = gscSummary

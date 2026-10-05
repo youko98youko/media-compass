@@ -24,15 +24,19 @@ npm start
 
 ### GSC連携の設定（実連携するとき）
 
-Google Search Console との連携（OAuth）の仕組みは実装済みです。`.env` に下記の2つを設定すると、
-「既存メディアを分析する」→「GSCと連携して分析する」がデモ画面から実際のGoogle連携に切り替わります（未設定の間はデモ表示）。
+Google Search Console との連携（OAuth）は実装済みです。「既存メディアを分析する」→「GSCと連携して分析する」の画面で、
+Google Cloud で発行したOAuthクライアントの **クライアントID・クライアントシークレット** を入力すると、実際にGoogleと連携できます
+（画面に発行手順と、Google Cloudに登録するリダイレクトURIが表示されます。入力せずに「デモで続ける」で体験することもできます）。
+入力した情報はサーバーのメモリ上にだけ保持され、ブラウザには保存されません。公開環境（Render等）では、シークレットの入力は推奨しません。
+
+OAuthクライアントの発行手順（画面にも同じ手順が表示されます）：
 
 1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクトを作成し、「Google Search Console API」を有効化する。
 2. 「OAuth同意画面」を設定する（ユーザーの種類：外部。公開前の「テスト」状態では、テストユーザーに登録したGoogleアカウントだけが連携できる）。
    スコープは `.../auth/webmasters.readonly`（読み取り専用）、`openid`、`email`。
 3. 「認証情報」→「OAuthクライアントID」（種類：ウェブアプリケーション）を作成し、「承認済みのリダイレクトURI」に
    `http://localhost:3000/api/gsc/callback`（公開環境では `https://（公開URL）/api/gsc/callback`）を登録する。
-4. 発行された値を `.env` に設定する：`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI`（手順3のURIと完全一致）。
+4. 発行されたクライアントIDとシークレットを、連携画面に入力する。毎回入力せずに済ませたい場合は、`.env` に `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`（必要なら `GOOGLE_REDIRECT_URI`）を設定すると、入力欄が出ずにGoogleの認証画面へ進みます。
 5. 連携に使うGoogleアカウントは、対象サイトのSearch Consoleで権限（所有者・フルユーザー等）を持っている必要がある。
 
 連携後は、分析するGSCプロパティを選び、過去28日分の検索クエリ・ページ別の実績・同一クエリで複数ページが表示されている候補（カニバリゼーション）を取得してAI分析に加えます。

@@ -10,23 +10,38 @@ const REVOKE_URL = process.env.GOOGLE_REVOKE_URL || 'https://oauth2.googleapis.c
 const GSC_API = process.env.GSC_API_BASE || 'https://www.googleapis.com/webmasters/v3';
 const SCOPES = ['https://www.googleapis.com/auth/webmasters.readonly', 'openid', 'email'];
 
+// サーバー側（.env）に認証情報が設定されているか。設定されていれば、画面での入力は不要。
 function enabled() {
   return !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
 }
 
-function redirectUri() {
-  return process.env.GOOGLE_REDIRECT_URI || `http://localhost:${process.env.PORT || 3000}/api/gsc/callback`;
+// Googleの認証後に戻ってくるURL。Google Cloudの「承認済みのリダイレクトURI」に登録する値と一致させる。
+function redirectUriFor(req) {
+  return process.env.GOOGLE_REDIRECT_URI || `${req.protocol}://${req.get('host')}/api/gsc/callback`;
+}
+
+function envConfig(req) {
+  return enabled() ? { clientId: process.env.GOOGLE_CLIENT_ID, clientSecret: process.env.GOOGLE_CLIENT_SECRET, redirectUri: redirectUriFor(req) } : null;
+}
+
+// 画面から入力された認証情報を検証して、接続設定にする（形式が明らかに違うものは弾く）
+function configFromInput(req, clientId, clientSecret) {
+  const id = String(clientId || '').trim();
+  const secret = String(clientSecret || '').trim();
+  if (!/^[\w.-]+\.apps\.googleusercontent\.com$/.test(id)) throw new Error('クライアントIDの形式が正しくありません（「…apps.googleusercontent.com」で終わる値です）');
+  if (secret.length < 10 || secret.length > 200 || /\s/.test(secret)) throw new Error('クライアントシークレットの形式が正しくありません');
+  return { clientId: id, clientSecret: secret, redirectUri: redirectUriFor(req) };
 }
 
 // CSRF対策：認可リクエストごとに使い捨ての state を発行し、コールバックで照合する
 const pendingStates = new Map();
-function buildAuthUrl(mediaId) {
+function buildAuthUrl(cfg, mediaId) {
   for (const [k, v] of pendingStates) if (v.exp < Date.now()) pendingStates.delete(k);
   const state = crypto.randomBytes(16).toString('hex');
   pendingStates.set(state, { mediaId, exp: Date.now() + 10 * 60 * 1000 });
   const p = new URLSearchParams({
-    client_id: process.env.GOOGLE_CLIENT_ID,
-    redirect_uri: redirectUri(),
+    client_id: cfg.clientId,
+    redirect_uri: cfg.redirectUri,
     response_type: 'code',
     scope: SCOPES.join(' '),
     access_type: 'offline', // refresh_token を得るため
@@ -43,11 +58,11 @@ function consumeState(state) {
   return v && v.exp >= Date.now() ? v.mediaId : null;
 }
 
-async function tokenRequest(params) {
+async function tokenRequest(cfg, params) {
   const res = await fetch(TOKEN_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ client_id: process.env.GOOGLE_CLIENT_ID, client_secret: process.env.GOOGLE_CLIENT_SECRET, ...params }),
+    body: new URLSearchParams({ client_id: cfg.clientId, client_secret: cfg.clientSecret, ...params }),
     signal: AbortSignal.timeout(15000),
   });
   const data = await res.json().catch(() => ({}));
@@ -62,10 +77,11 @@ function emailFromIdToken(idToken) {
 }
 
 // 認可コードをトークンに交換し、メディアに保存する接続情報を返す
-async function exchangeCode(code) {
-  const t = await tokenRequest({ code, grant_type: 'authorization_code', redirect_uri: redirectUri() });
+async function exchangeCode(cfg, code) {
+  const t = await tokenRequest(cfg, { code, grant_type: 'authorization_code', redirect_uri: cfg.redirectUri });
   if (!t.refresh_token) throw new Error('refresh_token が取得できませんでした。Googleアカウントの「サードパーティのアクセス」から一度解除して、もう一度連携してください');
   return {
+    cfg, // 更新（リフレッシュ）時に使う。メモリ上にのみ保持し、画面には返さない
     tokens: { access_token: t.access_token, refresh_token: t.refresh_token, expires_at: Date.now() + (t.expires_in || 3600) * 1000 },
     email: emailFromIdToken(t.id_token),
     siteUrl: null,
@@ -75,7 +91,7 @@ async function exchangeCode(code) {
 
 async function getAccessToken(gsc) {
   if (gsc.tokens.expires_at - 60000 > Date.now()) return gsc.tokens.access_token;
-  const t = await tokenRequest({ refresh_token: gsc.tokens.refresh_token, grant_type: 'refresh_token' });
+  const t = await tokenRequest(gsc.cfg, { refresh_token: gsc.tokens.refresh_token, grant_type: 'refresh_token' });
   gsc.tokens.access_token = t.access_token;
   gsc.tokens.expires_at = Date.now() + (t.expires_in || 3600) * 1000;
   return gsc.tokens.access_token;
@@ -179,4 +195,4 @@ async function revoke(gsc) {
   } catch { /* 失敗してもサーバー側のトークンは破棄する */ }
 }
 
-module.exports = { enabled, redirectUri, buildAuthUrl, consumeState, exchangeCode, listSites, rankSites, fetchSummary, revoke };
+module.exports = { enabled, redirectUriFor, envConfig, configFromInput, buildAuthUrl, consumeState, exchangeCode, listSites, rankSites, fetchSummary, revoke };
