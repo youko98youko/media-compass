@@ -257,6 +257,12 @@ app.get('/api/gsc/info', (req, res) => {
   res.json({ serverConfigured: gsc.enabled(), redirectUri: gsc.redirectUriFor(req) });
 });
 
+// 設定画面などで表示する、現在の実連携の状況（シークレットやトークンは返さない）
+app.post('/api/gsc/status', (req, res) => {
+  const m = mediaProfiles.get(req.body?.mediaId);
+  res.json(m?.gsc ? { connected: true, account: m.gsc.email, siteUrl: m.gsc.siteUrl, connectedAt: m.gsc.connectedAt } : { connected: false });
+});
+
 // 連携の開始：画面で入力された認証情報（またはサーバー設定）で、Googleの認証画面のURLを返す。
 // 入力されたシークレットはこのメディアのメモリ上にのみ保持し、画面には返さない。
 app.post('/api/gsc/start', (req, res) => {

@@ -27,6 +27,8 @@ const state = {
   newHearing: { history: [], question: null, questionNumber: 0, maxQuestions: 4, done: false, loading: false },
   direction: null,
   gscConnected: false,
+  gscDemo: false, // デモ連携を選んだか（実際のGoogle連携とは別）
+  gscContext: 'analyze', // GSC連携の起点：'analyze'（分析の流れ）| 'settings'（設定画面）
   wordpressConnected: false,
   wordpressSiteUrl: '',
   wpConnectContext: null, // 'publish' | 'settings'
@@ -236,13 +238,20 @@ function renderExistingUnderstand() {
       </div>
     </div>
   `, { active: false, nav: false });
-  document.getElementById('go-analyze-gsc').addEventListener('click', () => {
+  document.getElementById('go-analyze-gsc').addEventListener('click', async () => {
     state.siteUrlInput = (document.getElementById('site-url').value || '').trim() || 'https://example.co.jp';
+    state.gscContext = 'analyze';
+    // すでに実連携済みなら、認証をやり直さずにサイト選択へ進む
+    try {
+      const st = await api('/api/gsc/status', { body: { mediaId: state.mediaId } });
+      if (st.connected) { renderGscSites(); return; }
+    } catch (e) { /* 状況が取れなければ通常の連携画面へ */ }
     renderGscConnect();
   });
   document.getElementById('go-analyze-nogsc').addEventListener('click', () => {
     state.siteUrlInput = (document.getElementById('site-url').value || '').trim() || 'https://example.co.jp';
     state.gscConnected = false;
+    state.gscDemo = false;
     analyzeExisting();
   });
   pushHistory();
@@ -330,7 +339,9 @@ async function renderGscConnect() {
   const demoBtn = document.getElementById('gsc-demo');
   if (demoBtn) demoBtn.addEventListener('click', () => {
     state.gscConnected = true;
-    analyzeExisting();
+    state.gscDemo = true;
+    if (state.gscContext === 'settings') renderSettings();
+    else analyzeExisting();
   });
   document.getElementById('gsc-authorize').addEventListener('click', async () => {
     const errEl = document.getElementById('gsc-error');
@@ -346,7 +357,7 @@ async function renderGscConnect() {
       const res = await fetch('/api/gsc/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) { errEl.textContent = data.error || '連携を開始できませんでした'; return; }
-      sessionStorage.setItem('mcGscReturn', JSON.stringify({ mediaId: state.mediaId, mediaState: state.mediaState, siteUrlInput: state.siteUrlInput }));
+      sessionStorage.setItem('mcGscReturn', JSON.stringify({ mediaId: state.mediaId, mediaState: state.mediaState, siteUrlInput: state.siteUrlInput, gscContext: state.gscContext }));
       location.href = data.url;
     } catch (err) {
       errEl.textContent = 'サーバーに接続できませんでした';
@@ -370,10 +381,11 @@ async function renderGscSites() {
   const { account, sites, selected } = result;
   const preselect = selected || (sites.find((x) => x.matched) || {}).siteUrl || '';
   const hasMatch = sites.some((x) => x.matched);
+  const fromSettings = state.gscContext === 'settings';
   shell(`
     <div class="wrap">
       <div class="screen-head">
-        <div class="eyebrow">STEP 0-2 ・ メディア理解（既存）</div>
+        <div class="eyebrow">${fromSettings ? '設定' : 'STEP 0-2 ・ メディア理解（既存）'}</div>
         <h1>分析するサイトを選んでください</h1>
         <p>連携したアカウント${account ? `（${esc(account)}）` : ''}が権限を持つSearch Consoleのサイトです。</p>
       </div>
@@ -387,25 +399,31 @@ async function renderGscSites() {
             <div style="font-size:11px;color:var(--sub);">権限：${esc(x.permissionLevel)}</div></div>
           </label>`).join('')}
         <div class="btn-row">
-          ${sites.length ? '<button class="btn navy" id="gsc-site-go">このサイトで分析する →</button>' : ''}
+          ${sites.length ? `<button class="btn navy" id="gsc-site-go">${fromSettings ? 'このサイトに決定する' : 'このサイトで分析する →'}</button>` : ''}
           <button class="btn ghost" id="gsc-disconnect">連携を解除する</button>
+          ${fromSettings ? '<button class="btn ghost" id="gsc-back-settings">← 設定に戻る</button>' : ''}
         </div>
       </div>
     </div>
-  `, { active: false, nav: false });
+  `, fromSettings ? { active: false } : { active: false, nav: false });
   const go = document.getElementById('gsc-site-go');
   if (go) go.addEventListener('click', async () => {
     const picked = app.querySelector('input[name="gsc-site"]:checked');
     if (!picked) return;
     await api('/api/gsc/select-site', { body: { mediaId: state.mediaId, siteUrl: picked.value } });
     state.gscConnected = true;
-    analyzeExisting();
+    state.gscDemo = false;
+    if (fromSettings) renderSettings();
+    else analyzeExisting();
   });
   document.getElementById('gsc-disconnect').addEventListener('click', async () => {
     await api('/api/gsc/disconnect', { body: { mediaId: state.mediaId } });
     state.gscConnected = false;
-    renderExistingUnderstand();
+    if (fromSettings) renderSettings();
+    else renderExistingUnderstand();
   });
+  const backBtn = document.getElementById('gsc-back-settings');
+  if (backBtn) backBtn.addEventListener('click', renderSettings);
   pushHistory();
 }
 
@@ -422,13 +440,17 @@ function renderGscError(message) {
         <div class="missing-box"><div class="h">${esc(message)}</div></div>
         <div class="btn-row">
           <button class="btn navy" id="gsc-retry">もう一度連携する</button>
-          <button class="btn outline" id="gsc-skip">GSCなしで分析する →</button>
+          <button class="btn outline" id="gsc-skip">${state.gscContext === 'settings' ? '← 設定に戻る' : 'GSCなしで分析する →'}</button>
         </div>
       </div>
     </div>
   `, { active: false, nav: false });
   document.getElementById('gsc-retry').addEventListener('click', renderGscConnect);
-  document.getElementById('gsc-skip').addEventListener('click', () => { state.gscConnected = false; analyzeExisting(); });
+  document.getElementById('gsc-skip').addEventListener('click', () => {
+    state.gscConnected = false;
+    if (state.gscContext === 'settings') renderSettings();
+    else analyzeExisting();
+  });
   pushHistory();
 }
 
@@ -806,19 +828,61 @@ function renderDirectionSummary() {
 }
 
 // ---------------------------------------------------------------
-// 設定画面【新設】：WordPress連携をここで一元管理する
+// 設定画面【新設】：Google Search Console と WordPress の連携状況の確認・変更をここで一元管理する
 // ---------------------------------------------------------------
-function renderSettings() {
+async function renderSettings() {
   state.screen = 'settings';
   const connected = !!state.wordpressConnected;
+
+  // Google Search Console の現在の連携状況（実連携はサーバーに保持されているので、その都度取得する）
+  let gscStatus = { connected: false };
+  if (state.mediaId) {
+    try { gscStatus = await api('/api/gsc/status', { body: { mediaId: state.mediaId } }); } catch (e) { /* 取得できなければ未接続として表示 */ }
+  }
+  const gscDemo = !gscStatus.connected && !!state.gscDemo;
+
+  const gscBody = gscStatus.connected ? `
+        <div class="info-box">
+          <div class="h">接続中（実際のGoogleと連携）</div>
+          アカウント：${esc(gscStatus.account || '不明')}<br>
+          分析対象のサイト：${gscStatus.siteUrl ? esc(gscStatus.siteUrl) : '未選択（「サイトを切り替える」から選んでください）'}
+        </div>
+        <div class="btn-row">
+          <button class="btn navy" id="gsc-change-site">サイトを切り替える</button>
+          <button class="btn outline" id="gsc-real-connect">連携し直す</button>
+          <button class="btn ghost" id="gsc-settings-disconnect">連携を解除する</button>
+        </div>` : gscDemo ? `
+        <div class="info-box">
+          <div class="h">デモ連携（実際のGoogleには接続していません）</div>
+          分析結果に出るGSCの検索クエリは、デモ用の固定値です。
+        </div>
+        <div class="btn-row">
+          <button class="btn navy" id="gsc-real-connect">実際のGSCと連携する →</button>
+          <button class="btn ghost" id="gsc-demo-off">デモ連携を解除する</button>
+        </div>` : state.mediaId ? `
+        <div class="missing-box">
+          <div class="h">未接続</div>まだGoogle Search Consoleと連携していません。連携すると、検索クエリ・掲載順位などの実績を分析に使えます。
+        </div>
+        <div class="btn-row"><button class="btn navy" id="gsc-real-connect">GSCと連携する →</button></div>` : `
+        <div class="missing-box">
+          <div class="h">未接続</div>GSCとの連携は、「既存メディアを分析する」の流れから始められます。
+        </div>`;
+
   shell(`
     <div class="wrap">
       <div class="screen-head">
         <div class="eyebrow">設定</div>
-        <h1>WordPress連携</h1>
-        <p>接続すると、既存記事のタイトル・見出し構成の取得（3.2）や、生成した記事のワンクリック公開（3.17）ができるようになります。</p>
+        <h1>連携の設定</h1>
+        <p>Google Search Console と WordPress の接続状況を確認し、変更できます。</p>
       </div>
       <div class="card">
+        <h3 style="margin:0 0 4px;">Google Search Console</h3>
+        <p style="font-size:12.5px;color:var(--sub);margin:0 0 10px;">既存メディアの分析で、検索クエリ・掲載順位・ページ別の実績を取得するために使います（読み取り専用）。</p>
+        ${gscBody}
+      </div>
+      <div class="card">
+        <h3 style="margin:0 0 4px;">WordPress</h3>
+        <p style="font-size:12.5px;color:var(--sub);margin:0 0 10px;">接続すると、既存記事のタイトル・見出し構成の取得（3.2）や、生成した記事のワンクリック公開（3.17）ができるようになります。</p>
         ${connected ? `
           <div class="info-box">
             <div class="h">接続済み</div>${esc(state.wordpressSiteUrl || '')}
@@ -833,6 +897,21 @@ function renderSettings() {
       </div>
     </div>
   `, { active: false });
+
+  const gscConnectBtn = document.getElementById('gsc-real-connect');
+  if (gscConnectBtn) gscConnectBtn.addEventListener('click', () => { state.gscContext = 'settings'; renderGscConnect(); });
+  const gscChange = document.getElementById('gsc-change-site');
+  if (gscChange) gscChange.addEventListener('click', () => { state.gscContext = 'settings'; renderGscSites(); });
+  const gscOff = document.getElementById('gsc-settings-disconnect');
+  if (gscOff) gscOff.addEventListener('click', async () => {
+    await api('/api/gsc/disconnect', { body: { mediaId: state.mediaId } });
+    state.gscConnected = false;
+    state.gscDemo = false;
+    renderSettings();
+  });
+  const gscDemoOff = document.getElementById('gsc-demo-off');
+  if (gscDemoOff) gscDemoOff.addEventListener('click', () => { state.gscConnected = false; state.gscDemo = false; renderSettings(); });
+
   const connectBtn = document.getElementById('wp-connect-settings');
   if (connectBtn) connectBtn.addEventListener('click', () => { state.wpConnectContext = 'settings'; renderWordpressConnect(); });
   const disconnectBtn = document.getElementById('wp-disconnect');
