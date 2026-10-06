@@ -28,6 +28,8 @@ function isPrivateIp(ip) {
 
 async function assertPublicUrl(u) {
   if (!['http:', 'https:'].includes(u.protocol)) throw new Error('http/https以外のURLは取得できません');
+  // 自動テスト専用：ローカルの擬似サーバーへの接続を許可する。公開環境（Render／NODE_ENV=production）では常に無効。
+  if (process.env.ALLOW_LOCAL_TARGETS === '1' && process.env.NODE_ENV !== 'production' && !process.env.RENDER) return;
   if (u.port && !['80', '443'].includes(u.port)) throw new Error('標準ポート以外のURLは取得できません');
   const host = u.hostname.replace(/^\[|\]$/g, '');
   if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.internal') || host.endsWith('.local')) {
@@ -248,4 +250,4 @@ async function crawlSite(siteUrl) {
   return { ok: true, origin: origin.origin, discoveredBy, articlesCount: articles.length, sampledCount: pages.length, pages, notes };
 }
 
-module.exports = { crawlSite };
+module.exports = { crawlSite, assertPublicUrl };

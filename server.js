@@ -17,6 +17,8 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
 const { crawlSite } = require('./crawler');
 const gsc = require('./gsc');
+const images = require('./images');
+const wordpress = require('./wordpress');
 const crypto = require('crypto');
 
 const app = express();
@@ -400,6 +402,33 @@ app.post('/api/media/wordpress-connect', (req, res) => {
   const { siteUrl } = req.body || {};
   m.wordpress = { connected: true, siteUrl: siteUrl || '(未入力)' };
   res.json({ ok: true, siteUrl: m.wordpress.siteUrl });
+});
+
+// WordPressの実接続（REST API＋アプリケーションパスワード）。投稿は常に「下書き」。
+// 入力されたパスワードはこのメディアのメモリ上にのみ保持し、画面には返さない。
+app.post('/api/wordpress/connect', async (req, res) => {
+  const m = getMediaProfile(req, res);
+  if (!m) return;
+  const { siteUrl, username, appPassword } = req.body || {};
+  try {
+    const r = await wordpress.connect(siteUrl, username, appPassword);
+    m.wordpress = { connected: true, real: true, siteUrl: r.cfg.siteUrl, siteName: r.siteName, userName: r.userName, canUpload: r.canUpload, cfg: r.cfg };
+    res.json({ ok: true, siteUrl: r.cfg.siteUrl, siteName: r.siteName, userName: r.userName, canUpload: r.canUpload });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/wordpress/status', (req, res) => {
+  const w = mediaProfiles.get(req.body?.mediaId)?.wordpress;
+  res.json(w?.real ? { connected: true, siteUrl: w.siteUrl, siteName: w.siteName, userName: w.userName, canUpload: w.canUpload } : { connected: false });
+});
+
+app.post('/api/wordpress/disconnect', (req, res) => {
+  const m = getMediaProfile(req, res);
+  if (!m) return;
+  m.wordpress = null;
+  res.json({ ok: true });
 });
 
 // STEP 0-2b: 新規メディア理解（事業情報の登録＋事業理解ヒアリング／3.3）
@@ -790,10 +819,96 @@ app.post('/api/article/regenerate-block', async (req, res) => {
 // ---------------------------------------------------------------
 // 公開（3.17を仮の1クリック公開として簡略化）
 // ---------------------------------------------------------------
-app.post('/api/publish', (req, res) => {
+// 挿入画像の生成（OpenAI Images API）。AI連携が有効なときだけ使える。
+app.post('/api/image/generate', async (req, res) => {
+  const s = getSession(req, res);
+  if (!s) return;
+  if (!AI_ENABLED) return res.status(400).json({ error: 'AI連携が無効のため、画像は生成できません' });
+  const block = s.article?.blocks?.[req.body?.blockIndex];
+  if (!block || block.type !== 'image') return res.status(400).json({ error: 'invalid blockIndex' });
+  if ((s.imageCount || 0) >= images.MAX_PER_SESSION) {
+    return res.status(429).json({ error: `1記事あたりの画像生成の上限（${images.MAX_PER_SESSION}回）に達しました` });
+  }
+  s.imageCount = (s.imageCount || 0) + 1;
+  try {
+    const { buffer, mime } = await images.generate(images.buildPrompt(s.theme.title, block));
+    block.src = `/api/image/${images.put(buffer, mime)}`;
+    res.json({ src: block.src });
+  } catch (e) {
+    s.imageCount -= 1; // 失敗した分は回数に数えない
+    console.warn('[画像生成失敗]', e.message);
+    res.status(502).json({ error: e.message });
+  }
+});
+
+app.get('/api/image/:id', (req, res) => {
+  const img = images.get(req.params.id);
+  if (!img) return res.status(404).end();
+  res.set('Content-Type', img.mime);
+  res.set('Cache-Control', 'private, max-age=3600');
+  res.send(img.buffer);
+});
+
+// 記事をWordPressへ「下書き」として投稿する（画像は先にメディアライブラリへアップロードする）
+async function publishToWordPress(s, wp) {
+  s.wpMedia = s.wpMedia || {}; // 画像URL -> アップロード済みのメディア（再投稿時に重複アップロードしない）
+  const blocks = s.article.blocks;
+  const imageUrls = {};
+  let featured = null;
+  let skipped = 0;
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    if (b.type !== 'image') continue;
+    const img = images.getBySrc(b.src);
+    if (!img) { skipped++; continue; } // 生成されていない仮画像は、WordPressには送らない
+    if (!s.wpMedia[b.src]) {
+      s.wpMedia[b.src] = await wordpress.uploadMedia(wp.cfg, {
+        buffer: img.buffer,
+        mime: img.mime,
+        filename: `mediacompass-${s.id}-${i}.${img.mime === 'image/png' ? 'png' : 'jpg'}`,
+        alt: b.alt,
+      });
+    }
+    imageUrls[i] = s.wpMedia[b.src].url;
+    if (b.role === 'hero' && !featured) featured = s.wpMedia[b.src].id;
+  }
+  const draft = await wordpress.saveDraft(wp.cfg, {
+    title: s.article.title,
+    html: wordpress.blocksToHtml(blocks, imageUrls),
+    featuredMedia: featured,
+    existingId: s.wpDraftId,
+  });
+  s.wpDraftId = draft.id;
+  return {
+    mode: 'wordpress-draft',
+    siteUrl: wp.siteUrl,
+    siteName: wp.siteName,
+    draftId: draft.id,
+    editUrl: draft.editUrl,
+    previewUrl: draft.previewUrl,
+    imagesInDraft: Object.keys(imageUrls).length,
+    skippedImages: skipped,
+    hasFeatured: !!featured,
+    savedAt: new Date().toISOString(),
+  };
+}
+
+app.post('/api/publish', async (req, res) => {
   const s = getSession(req, res);
   if (!s) return;
   if (!s.article) return res.status(400).json({ error: 'article not generated yet' });
+
+  // WordPressに実接続している場合は、公開ではなく「下書き投稿」を行う
+  const wp = s.mediaId ? mediaProfiles.get(s.mediaId)?.wordpress : null;
+  if (req.body?.expectWordpress && !wp?.real) return res.status(409).json({ error: 'wordpress_not_connected' });
+  if (wp?.real) {
+    try {
+      return res.json(await publishToWordPress(s, wp));
+    } catch (e) {
+      console.warn('[WordPress投稿失敗]', e.message);
+      return res.status(502).json({ error: e.message });
+    }
+  }
 
   const articleId = newId('art');
   const record = {

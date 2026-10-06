@@ -30,6 +30,7 @@ const state = {
   gscDemo: false, // デモ連携を選んだか（実際のGoogle連携とは別）
   gscContext: 'analyze', // GSC連携の起点：'analyze'（分析の流れ）| 'settings'（設定画面）
   wordpressConnected: false,
+  wordpressReal: false, // 実際のWordPressに接続しているか（デモ接続とは別）
   wordpressSiteUrl: '',
   wpConnectContext: null, // 'publish' | 'settings'
 };
@@ -470,51 +471,107 @@ function handleGscReturn() {
   return true;
 }
 
-// WordPress接続の疑似的な確認画面（プロトタイプ用の仮実装。実際のWordPressサイトへの接続は行わない）
+// WordPress接続画面。実際のWordPressサイトにREST API＋アプリケーションパスワードで接続する（投稿は常に「下書き」）。
 // 「設定」画面、または記事の公開時（未接続の場合）から呼ばれる（state.wpConnectContextで分岐：'publish' | 'settings'）
 function renderWordpressConnect() {
   state.screen = 'wordpressConnect';
   const isPublish = state.wpConnectContext === 'publish';
+  const isLocal = ['localhost', '127.0.0.1'].includes(location.hostname);
+  const input = 'width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;box-sizing:border-box;';
   shell(`
     <div class="wrap">
       <div class="screen-head">
-        <div class="eyebrow">${isPublish ? '公開に必要な設定' : '設定'}</div>
+        <div class="eyebrow">${isPublish ? '下書きの投稿に必要な設定' : '設定'}</div>
         <h1>WordPress と接続します</h1>
         <p>${isPublish
-          ? '記事を公開するには、WordPressサイトとの接続が必要です。'
-          : '接続すると、既存記事のタイトル・見出し構成の取得や、記事のワンクリック公開ができるようになります（3.17）。'}</p>
+          ? '記事をWordPressに下書きとして投稿するには、WordPressサイトとの接続が必要です。'
+          : '接続すると、生成した記事を、WordPressに「下書き」として投稿できるようになります（3.17）。'}</p>
       </div>
       <div class="card">
         <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:14px;">
           <span style="font-size:22px;">📝</span>
           <div>
             <div style="font-weight:700;font-size:13.5px;">WordPress</div>
-            <div style="font-size:11.5px;color:var(--sub);">サイトのURLを入力してください</div>
+            <div style="font-size:11.5px;color:var(--sub);">サイトのURLと、投稿に使うユーザーの情報を入力してください</div>
           </div>
         </div>
-        <div class="field-grid">
-          <div class="k">サイトURL</div><div class="v"><input id="wp-site-url" type="text" value="${esc(state.wordpressSiteUrl || state.siteUrlInput || '')}" placeholder="https://example.co.jp" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;"></div>
-          <div class="k">接続方式</div><div class="v">アプリケーションパスワード（デモ）</div>
+        <div class="info-box" style="margin:10px 0;">
+          <div class="h">安全のため、投稿は「下書き」までです</div>このアプリから記事を公開することはありません。投稿された下書きを、WordPressの管理画面で確認して、公開してください。
         </div>
-        <div style="font-size:10.5px;color:var(--sub);margin:10px 0 4px;">※プロトタイプのため、実際のWordPressサイトへの接続は行われません。ボタンを押すと接続済みとして次に進みます。</div>
-        <div style="font-size:10.5px;color:var(--sub);margin-bottom:10px;">一度接続すると、次回からはこの画面は表示されず、そのまま公開されます。</div>
+        <details style="margin:10px 0;">
+          <summary style="cursor:pointer;font-size:12.5px;font-weight:700;color:var(--sub);">アプリケーションパスワードの発行手順</summary>
+          <ol style="font-size:12.5px;line-height:1.8;margin:8px 0 0 18px;padding:0;">
+            <li>WordPressの管理画面に、投稿に使うユーザーでログインする。</li>
+            <li>左メニューの「ユーザー」→「プロフィール」を開く。</li>
+            <li>下の方の「アプリケーションパスワード」に、名前（例：メディアコンパス極）を入れて「新しいアプリケーションパスワードを追加」を押す。</li>
+            <li>表示されたパスワードをコピーして、下の欄に貼り付ける（<b>この画面を閉じると二度と表示されません</b>）。</li>
+          </ol>
+          <div style="font-size:11.5px;color:var(--sub);margin-top:6px;">※ログイン用のパスワードではなく、ここで発行したアプリケーションパスワードを使います。サイトがHTTPSであること、投稿者以上の権限があることが必要です。見つからない場合は、セキュリティ系のプラグインでREST APIが制限されていないか、確認してください。</div>
+        </details>
+        <div class="field-grid">
+          <div class="k">サイトURL</div><div class="v"><input id="wp-site-url" type="text" value="${esc(state.wordpressSiteUrl || '')}" placeholder="https://example.co.jp" style="${input}"></div>
+          <div class="k">ユーザー名</div><div class="v"><input id="wp-username" type="text" autocomplete="off" placeholder="WordPressのユーザー名" style="${input}"></div>
+          <div class="k">アプリケーションパスワード</div><div class="v"><input id="wp-app-password" type="password" autocomplete="off" placeholder="xxxx xxxx xxxx xxxx xxxx xxxx" style="${input}"></div>
+        </div>
+        <div style="font-size:10.5px;color:var(--sub);margin:8px 0 4px;">※入力した情報は、この接続のためにサーバーのメモリ上にだけ保持します（ブラウザには保存せず、サーバーを再起動すると消えます）。一度接続すると、次回からはこの画面は表示されません。</div>
+        ${isLocal ? '' : '<div class="missing-box" style="margin:8px 0;"><div class="h">このサイトは誰でもアクセスできる公開環境です</div>パスワードは秘密の情報です。公開環境での入力はおすすめしません。実際の接続は、ご自身のパソコンで動かすプロトタイプ（localhost:3000）で行ってください。</div>'}
+        <div id="wp-error" style="color:var(--danger);font-size:12.5px;margin:6px 0;"></div>
         <div class="btn-row">
           <button class="btn navy" id="wp-authorize">接続して続ける →</button>
+          <button class="btn outline" id="wp-demo">デモで続ける（実際には接続しない）</button>
           <button class="btn ghost" id="wp-cancel">← キャンセル</button>
         </div>
       </div>
     </div>
   `, { active: false, nav: false });
+
+  const afterConnect = () => {
+    if (isPublish) doPublish();
+    else renderSettings();
+  };
   document.getElementById('wp-authorize').addEventListener('click', async () => {
+    const errEl = document.getElementById('wp-error');
+    const btn = document.getElementById('wp-authorize');
+    errEl.textContent = '';
+    const siteUrl = document.getElementById('wp-site-url').value;
+    btn.disabled = true;
+    btn.textContent = '接続を確認しています…';
+    try {
+      const res = await fetch('/api/wordpress/connect', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          mediaId: state.mediaId,
+          siteUrl,
+          username: document.getElementById('wp-username').value,
+          appPassword: document.getElementById('wp-app-password').value,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        errEl.textContent = data.error || '接続できませんでした';
+        return;
+      }
+      state.wordpressSiteUrl = data.siteUrl;
+      state.wordpressConnected = true;
+      state.wordpressReal = true;
+      afterConnect();
+    } catch (err) {
+      errEl.textContent = 'サーバーに接続できませんでした';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '接続して続ける →';
+    }
+  });
+  document.getElementById('wp-demo').addEventListener('click', async () => {
     const url = (document.getElementById('wp-site-url').value || '').trim() || state.wordpressSiteUrl || 'https://example.co.jp';
-    state.siteUrlInput = url;
     state.wordpressSiteUrl = url;
     try {
       await api('/api/media/wordpress-connect', { body: { mediaId: state.mediaId, siteUrl: url } });
     } catch (e) { /* デモでは失敗しても先に進める */ }
     state.wordpressConnected = true;
-    if (isPublish) doPublish();
-    else renderSettings();
+    state.wordpressReal = false;
+    afterConnect();
   });
   document.getElementById('wp-cancel').addEventListener('click', () => history.back());
   pushHistory();
@@ -841,6 +898,13 @@ async function renderSettings() {
   }
   const gscDemo = !gscStatus.connected && !!state.gscDemo;
 
+  // WordPressの現在の接続状況（実接続はサーバーに保持されているので、その都度取得する）
+  let wpStatus = { connected: false };
+  if (state.mediaId) {
+    try { wpStatus = await api('/api/wordpress/status', { body: { mediaId: state.mediaId } }); } catch (e) { /* 取得できなければ未接続として表示 */ }
+  }
+  const wpDemo = !wpStatus.connected && connected && !state.wordpressReal;
+
   const gscBody = gscStatus.connected ? `
         <div class="info-box">
           <div class="h">接続中（実際のGoogleと連携）</div>
@@ -882,17 +946,35 @@ async function renderSettings() {
       </div>
       <div class="card">
         <h3 style="margin:0 0 4px;">WordPress</h3>
-        <p style="font-size:12.5px;color:var(--sub);margin:0 0 10px;">接続すると、既存記事のタイトル・見出し構成の取得（3.2）や、生成した記事のワンクリック公開（3.17）ができるようになります。</p>
-        ${connected ? `
+        <p style="font-size:12.5px;color:var(--sub);margin:0 0 10px;">接続すると、生成した記事を、WordPressに「下書き」として投稿できるようになります（3.17）。公開はWordPress側で行います。</p>
+        ${wpStatus.connected ? `
           <div class="info-box">
-            <div class="h">接続済み</div>${esc(state.wordpressSiteUrl || '')}
+            <div class="h">接続中（実際のWordPressと連携）</div>
+            サイト：${esc(wpStatus.siteName || '')} ${esc(wpStatus.siteUrl)}<br>
+            ユーザー：${esc(wpStatus.userName || '')}<br>
+            投稿の種類：下書きのみ${wpStatus.canUpload ? '（画像のアップロード可）' : '（このユーザーは画像をアップロードできません）'}
           </div>
-          <div class="btn-row"><button class="btn ghost" id="wp-disconnect">接続を解除する</button></div>
-        ` : `
+          <div class="btn-row">
+            <button class="btn outline" id="wp-connect-settings">接続し直す</button>
+            <button class="btn ghost" id="wp-disconnect">接続を解除する</button>
+          </div>
+        ` : wpDemo ? `
+          <div class="info-box">
+            <div class="h">デモ接続（実際のWordPressには接続していません）</div>${esc(state.wordpressSiteUrl || '')}<br>記事の公開は、アプリ内の疑似ページになります。
+          </div>
+          <div class="btn-row">
+            <button class="btn navy" id="wp-connect-settings">実際のWordPressと接続する →</button>
+            <button class="btn ghost" id="wp-disconnect">デモ接続を解除する</button>
+          </div>
+        ` : state.mediaId ? `
           <div class="missing-box">
-            <div class="h">未接続</div>まだWordPressと接続していません。記事を公開する際に接続を求められますが、ここから先に接続しておくこともできます。
+            <div class="h">未接続</div>まだWordPressと接続していません。記事を投稿する際に接続を求められますが、ここから先に接続しておくこともできます。
           </div>
           <div class="btn-row"><button class="btn navy" id="wp-connect-settings">WordPressと接続する →</button></div>
+        ` : `
+          <div class="missing-box">
+            <div class="h">未接続</div>WordPressとの接続は、「既存メディアを分析する」または「新しくメディアを構築する」の流れの中から始められます。
+          </div>
         `}
       </div>
     </div>
@@ -915,7 +997,12 @@ async function renderSettings() {
   const connectBtn = document.getElementById('wp-connect-settings');
   if (connectBtn) connectBtn.addEventListener('click', () => { state.wpConnectContext = 'settings'; renderWordpressConnect(); });
   const disconnectBtn = document.getElementById('wp-disconnect');
-  if (disconnectBtn) disconnectBtn.addEventListener('click', () => { state.wordpressConnected = false; renderSettings(); });
+  if (disconnectBtn) disconnectBtn.addEventListener('click', async () => {
+    if (wpStatus.connected) await api('/api/wordpress/disconnect', { body: { mediaId: state.mediaId } });
+    state.wordpressConnected = false;
+    state.wordpressReal = false;
+    renderSettings();
+  });
   pushHistory();
 }
 
@@ -1220,17 +1307,89 @@ async function renderArticleGenerating() {
   renderArticleEdit();
 }
 
+// ---------------------------------------------------------------
+// 挿入画像の自動生成（AI連携時）。生成中のブロック番号は、画面の再描画をまたいで覚えておく
+// ---------------------------------------------------------------
+const imageBusy = new Set();
+
+function imageSrc(block, isHero) {
+  return block.src || placeholderImageDataUri(block.alt || '', isHero ? 900 : 420, isHero ? 320 : 240);
+}
+
+function imageTag(block, i) {
+  if (imageBusy.has(i)) return '<span class="proto-tag">画像を生成しています…</span>';
+  if (block.src) return '<span class="proto-tag">AI生成画像</span>';
+  return state.aiEnabled ? '<span class="proto-tag">仮画像（未生成）</span>' : '<span class="proto-tag">仮画像（AI連携時に自動生成）</span>';
+}
+
+function imageButtonLabel(block, i) {
+  if (!state.aiEnabled) return '🖼 画像変更';
+  if (imageBusy.has(i)) return '⏳ 生成中…';
+  return block.src ? '🖼 再生成' : '🖼 画像を生成';
+}
+
+// 1枚を生成して、そのブロックだけ表示を差し替える（他の編集中の内容は触らない）
+async function generateImage(i) {
+  if (imageBusy.has(i)) return true;
+  imageBusy.add(i);
+  refreshImageBlock(i);
+  let ok = true;
+  try {
+    const res = await fetch('/api/image/generate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: state.sessionId, blockIndex: i }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || '画像を生成できませんでした');
+    state.article.blocks[i].src = data.src;
+  } catch (e) {
+    ok = false;
+    toast(e.message || '画像を生成できませんでした');
+  }
+  imageBusy.delete(i);
+  refreshImageBlock(i);
+  return ok;
+}
+
+function refreshImageBlock(i) {
+  const wrap = app.querySelector(`[data-block="${i}"]`);
+  if (!wrap || !state.article) return;
+  wrap.outerHTML = blockToEditableHtml(state.article.blocks[i], i);
+  bindImageButton(i);
+}
+
+function bindImageButton(i) {
+  const btn = app.querySelector(`[data-block="${i}"] [data-reimg]`);
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    if (state.aiEnabled) {
+      generateImage(i);
+    } else {
+      toast('画像を再生成しました（仮画像を差し替え）');
+      state.article.blocks[i].alt = state.article.blocks[i].alt + '·';
+      renderArticleEdit();
+    }
+  });
+}
+
+// 未生成の画像を、上から順に生成する（失敗したら止める）
+async function generateAllImages() {
+  const todo = state.article.blocks.map((b, i) => (b.type === 'image' && !b.src ? i : -1)).filter((i) => i >= 0);
+  for (const i of todo) {
+    if (state.screen !== 'articleEdit') return;
+    if (!(await generateImage(i))) return;
+  }
+  if (todo.length && state.screen === 'articleEdit') toast('画像の生成が完了しました');
+}
+
 function blockToEditableHtml(block, i) {
   const tools = `<div class="block-toolbar">
       ${['paragraph', 'list', 'quote'].includes(block.type) ? `<button data-regen="${i}">↻ 再生成</button>` : ''}
-      ${block.type.startsWith('image') || block.role ? `<button data-reimg="${i}">🖼 画像変更</button>` : ''}
+      ${block.type === 'image' ? `<button data-reimg="${i}" ${imageBusy.has(i) ? 'disabled' : ''}>${imageButtonLabel(block, i)}</button>` : ''}
     </div>`;
   let inner = '';
   switch (block.type) {
     case 'image': {
       const isHero = block.role === 'hero';
-      inner = `<img class="art-img ${isHero ? '' : 'inline'}" src="${placeholderImageDataUri(block.alt || '', isHero ? 900 : 420, isHero ? 320 : 240)}" alt="${esc(block.alt)}">
-        <div class="img-cap">${esc(block.alt)}${block.caption ? ' - ' + esc(block.caption) : ''}<span class="proto-tag">仮画像（本番は画像生成AI想定）</span></div>`;
+      inner = `<img class="art-img ${isHero ? '' : 'inline'}" src="${esc(imageSrc(block, isHero))}" alt="${esc(block.alt)}" ${imageBusy.has(i) ? 'style="opacity:.45"' : ''}>
+        <div class="img-cap">${esc(block.alt)}${block.caption ? ' - ' + esc(block.caption) : ''}${imageTag(block, i)}</div>`;
       break;
     }
     case 'h2': inner = `<h2 class="art-h2 editable" contenteditable="true" data-field="text">${esc(block.text)}</h2>`; break;
@@ -1263,10 +1422,15 @@ function renderArticleEdit() {
       </div>
       <div class="card">
         <div style="font-size:11.5px;color:var(--sub);margin-bottom:10px;">使用した一次情報・ヒアリング回答は本文中に反映されています。<span class="proto-tag">生成モード: ${state.lastMode || (state.aiEnabled ? 'ai' : 'simulated')}</span></div>
+        ${state.aiEnabled ? `<div class="info-box" style="margin-bottom:12px;">
+          <div class="h">挿入画像は、AI（OpenAI）が自動で生成します</div>
+          記事を開くと、画像が上から順に生成されます（1枚につき数十秒）。気に入らない画像は、各画像の「再生成」で作り直せます。画像を1枚生成するごとに、OpenAIの利用料がかかります（費用が膨らまないよう、1記事あたりの生成回数には上限があります）。
+          <div style="margin-top:6px;"><button class="btn outline small" id="gen-all-images" type="button">未生成の画像をまとめて生成</button></div>
+        </div>` : ''}
         ${blocksHtml}
         <div class="btn-row">
-          <button class="btn ghost" id="save-draft">下書きとして保存</button>
-          <button class="btn gold" id="go-publish">公開する →</button>
+          <button class="btn ghost" id="save-draft">編集内容を保存</button>
+          <button class="btn gold" id="go-publish">${state.wordpressConnected && state.wordpressReal ? 'WordPressに下書き保存 →' : '公開する →'}</button>
         </div>
       </div>
     </div>
@@ -1280,15 +1444,12 @@ function renderArticleEdit() {
     });
   });
   app.querySelectorAll('[data-regen]').forEach((btn) => btn.addEventListener('click', () => regenerateBlock(Number(btn.dataset.regen))));
-  app.querySelectorAll('[data-reimg]').forEach((btn) => btn.addEventListener('click', () => {
-    toast('画像を再生成しました（仮画像を差し替え）');
-    const idx = Number(btn.dataset.reimg);
-    state.article.blocks[idx].alt = state.article.blocks[idx].alt + '·';
-    renderArticleEdit();
-  }));
+  state.article.blocks.forEach((b, i) => { if (b.type === 'image') bindImageButton(i); });
+  const genAll = document.getElementById('gen-all-images');
+  if (genAll) genAll.addEventListener('click', generateAllImages);
   document.getElementById('save-draft').addEventListener('click', async () => {
     await api('/api/article/save', { body: { sessionId: state.sessionId, article: state.article } });
-    toast('下書きを保存しました');
+    toast('編集内容を保存しました');
   });
   document.getElementById('go-publish').addEventListener('click', () => {
     if (state.wordpressConnected) {
@@ -1299,6 +1460,12 @@ function renderArticleEdit() {
     }
   });
   pushHistory();
+
+  // AI連携中は、画像の自動生成を、記事ごとに1回だけ始める（戻る・進むで再描画しても、やり直さない）
+  if (state.aiEnabled && state.autoImagesFor !== state.sessionId && state.article.blocks.some((b) => b.type === 'image' && !b.src)) {
+    state.autoImagesFor = state.sessionId;
+    generateAllImages();
+  }
 }
 
 async function regenerateBlock(idx) {
@@ -1316,14 +1483,91 @@ async function regenerateBlock(idx) {
 // STEP 9: 公開 → 実際のメディア記事ページ
 // ---------------------------------------------------------------
 async function doPublish() {
-  await api('/api/article/save', { body: { sessionId: state.sessionId, article: state.article } });
-  const info = await api('/api/publish', { body: { sessionId: state.sessionId } });
-  state.publishInfo = info;
+  const real = !!(state.wordpressConnected && state.wordpressReal);
+  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>${real ? 'WordPressに下書きを保存しています…（画像のアップロードを含むため、少しかかります）' : '公開しています…'}</div></div>`);
+  let res;
+  let data;
+  try {
+    await api('/api/article/save', { body: { sessionId: state.sessionId, article: state.article } });
+    res = await fetch('/api/publish', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: state.sessionId, expectWordpress: real }) });
+    data = await res.json().catch(() => ({}));
+  } catch (err) {
+    showFatalError(err);
+    return;
+  }
+  if (res.status === 409) {
+    // サーバーを再起動した等で、WordPressの接続情報が失われている
+    state.wordpressConnected = false;
+    state.wordpressReal = false;
+    state.wpConnectContext = 'publish';
+    renderWordpressConnect();
+    toast('WordPressの接続が切れていました。もう一度接続してください');
+    return;
+  }
+  if (!res.ok) {
+    renderPublishError(data.error || '投稿できませんでした');
+    return;
+  }
+  state.publishInfo = data;
   state.screen = 'published';
   renderPublishedStatus();
 }
 
+function renderPublishError(message) {
+  state.screen = 'publishError';
+  state.publishErrorMessage = message;
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">STEP 9 ・ WordPressへの投稿</div>
+        <h1>WordPressに投稿できませんでした</h1>
+      </div>
+      <div class="card">
+        <div class="missing-box"><div class="h">${esc(message)}</div>記事の内容は失われていません。原因を確認して、もう一度お試しください。</div>
+        <div class="btn-row">
+          <button class="btn navy" id="pub-retry">もう一度投稿する</button>
+          <button class="btn outline" id="pub-reconnect">WordPressの接続を見直す</button>
+          <button class="btn ghost" id="pub-back">← 編集画面に戻る</button>
+        </div>
+      </div>
+    </div>
+  `);
+  document.getElementById('pub-retry').addEventListener('click', doPublish);
+  document.getElementById('pub-reconnect').addEventListener('click', () => { state.wpConnectContext = 'publish'; renderWordpressConnect(); });
+  document.getElementById('pub-back').addEventListener('click', renderArticleEdit);
+  pushHistory();
+}
+
 function renderPublishedStatus() {
+  const info = state.publishInfo;
+  if (info && info.mode === 'wordpress-draft') {
+    shell(`
+      <div class="wrap">
+        <div class="screen-head">
+          <div class="eyebrow">STEP 10 ・ WordPressへの下書き投稿</div>
+          <h1>WordPressに下書きとして保存しました</h1>
+          <p>この記事はまだ公開されていません。WordPressの管理画面で内容を確認し、問題がなければ公開してください。</p>
+        </div>
+        <div class="card">
+          <div class="field-grid">
+            <div class="k">投稿先</div><div class="v">${esc(info.siteName || '')} ${esc(info.siteUrl)}</div>
+            <div class="k">状態</div><div class="v">下書き（非公開）</div>
+            <div class="k">画像</div><div class="v">${info.imagesInDraft}枚をアップロード${info.hasFeatured ? '（アイキャッチ画像を設定済み）' : ''}${info.skippedImages ? `／未生成の仮画像${info.skippedImages}枚は、含めていません` : ''}</div>
+            <div class="k">保存日時</div><div class="v">${new Date(info.savedAt).toLocaleString('ja-JP')}</div>
+          </div>
+          <div class="btn-row">
+            <a class="btn navy" href="${esc(info.editUrl)}" target="_blank" rel="noopener">WordPressで下書きを開く →</a>
+            <a class="btn outline" href="${esc(info.previewUrl)}" target="_blank" rel="noopener">プレビューを見る</a>
+            <button class="btn ghost" id="back-dash2">ダッシュボードに戻る</button>
+          </div>
+          <div style="font-size:11px;color:var(--sub);margin-top:8px;">※このアプリからは、記事を公開しません。編集後にもう一度「WordPressに下書き保存」を押すと、同じ下書きを更新します（WordPress側ですでに公開した場合は、公開済みの記事には手を加えず、別の下書きとして保存します）。</div>
+        </div>
+      </div>
+    `);
+    document.getElementById('back-dash2').addEventListener('click', renderDashboard);
+    pushHistory();
+    return;
+  }
   shell(`
     <div class="wrap">
       <div class="screen-head">
@@ -1353,7 +1597,7 @@ function blockToReaderHtml(block) {
   switch (block.type) {
     case 'image': {
       const isHero = block.role === 'hero';
-      return `<img class="art-img ${isHero ? '' : 'inline'}" src="${placeholderImageDataUri(block.alt || '', isHero ? 900 : 420, isHero ? 340 : 240)}" alt="${esc(block.alt)}"><div class="img-cap">${esc(block.caption || '')}</div>`;
+      return `<img class="art-img ${isHero ? '' : 'inline'}" src="${esc(block.src || placeholderImageDataUri(block.alt || '', isHero ? 900 : 420, isHero ? 340 : 240))}" alt="${esc(block.alt)}"><div class="img-cap">${esc(block.caption || '')}</div>`;
     }
     case 'h2': return `<h2 class="art-h2">${esc(block.text)}</h2>`;
     case 'h3': return `<h3 class="art-h3">${esc(block.text)}</h3>`;
@@ -1533,6 +1777,7 @@ const SCREEN_RENDERERS = {
   outline: renderOutline,
   articleEdit: renderArticleEdit,
   published: renderPublishedStatus,
+  publishError: () => renderPublishError(state.publishErrorMessage || ''),
   mediaPage: () => renderMediaPage(state.publishInfo && state.publishInfo.articleId),
   monitoring: renderMonitoring,
   fixDetail: renderFixDetail,
