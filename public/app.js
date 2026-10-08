@@ -1865,7 +1865,7 @@ async function renderMeasures() {
 // 描画前に、登録フォームの入力途中の内容を覚えておく（一覧の操作で再描画しても、消えないように）
 function captureMeasureDraft() {
   const t = document.getElementById('m-title');
-  if (t) measureDraft = { title: t.value, memo: document.getElementById('m-memo').value, status: document.getElementById('m-status').value };
+  if (t) measureDraft = { title: t.value, memo: document.getElementById('m-memo').value, status: '未着手' };
 }
 
 function drawMeasures({ keepDraft = true } = {}) {
@@ -1912,9 +1912,8 @@ function drawMeasures({ keepDraft = true } = {}) {
         <div class="row"><input id="m-title" type="text" maxlength="100" placeholder="施策名（例：費用相場の記事をリライトする）" value="${esc(measureDraft.title)}"></div>
         <div class="row"><textarea id="m-memo" rows="2" maxlength="2000" placeholder="メモ（任意）">${esc(measureDraft.memo)}</textarea></div>
         <div class="row" style="align-items:center;">
-          <label style="font-size:12.5px;font-weight:700;color:var(--sub);">ステータス</label>
-          <select id="m-status">${options(measureDraft.status)}</select>
           <button class="btn navy small" id="m-add">登録する</button>
+          <span style="font-size:11.5px;color:var(--sub);">登録した施策は「未着手」から始まります。ステータスは、一覧の各施策で変更できます。</span>
         </div>
       </div>
       <div class="chips">
