@@ -216,3 +216,19 @@ button{font-family:inherit;}
   .field-grid{grid-template-columns:1fr;}
   .field-grid .k{margin-top:8px;}
 }
+
+/* ---------- 施策ステータス管理 ---------- */
+.pill.blue{background:var(--ext-bg); color:var(--ext);}
+.measure{display:flex; flex-direction:column; gap:8px;}
+.measure .top{display:flex; gap:10px; align-items:flex-start; flex-wrap:wrap;}
+.measure .title{font-weight:700; font-size:14.5px; flex:1; min-width:180px; word-break:break-word;}
+.measure .memo{font-size:12.5px; color:var(--sub); white-space:pre-wrap; word-break:break-word;}
+.measure .meta{font-size:11px; color:var(--sub);}
+.measure select, .m-form select, .m-form input, .m-form textarea, .auth-form input{
+  font-family:inherit; font-size:13px; padding:7px 10px; border:1px solid var(--line); border-radius:8px; background:#fff; color:var(--ink); box-sizing:border-box;
+}
+.m-form input, .m-form textarea, .auth-form input{width:100%;}
+.m-form .row{display:flex; gap:10px; flex-wrap:wrap; margin-bottom:8px;}
+.chips{display:flex; gap:8px; flex-wrap:wrap; margin:12px 0;}
+.chip{border:1px solid var(--line); background:#fff; color:var(--sub); border-radius:999px; padding:6px 14px; font-size:12px; font-weight:700; cursor:pointer; font-family:inherit;}
+.chip.on{background:var(--navy); color:#fff; border-color:var(--navy);}

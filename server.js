@@ -24,6 +24,7 @@ const crypto = require('crypto');
 const app = express();
 app.set('trust proxy', true); // Render等のプロキシ配下でも、https/ホスト名を正しく取得する（GSC連携のリダイレクトURI用）
 app.use(express.json({ limit: '1mb' }));
+require('./accounts').install(app); // アカウント（ログイン）と、施策のステータス管理（ローカル版のみ）
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'media-compass-saas-prototype.html'));

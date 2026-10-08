@@ -33,6 +33,10 @@ const state = {
   wordpressReal: false, // 実際のWordPressに接続しているか（デモ接続とは別）
   wordpressSiteUrl: '',
   wpConnectContext: null, // 'publish' | 'settings'
+  accountsEnabled: false, // アカウント機能（ローカル版のみ）が使えるか
+  user: null, // ログイン中のアカウント { id, username }
+  authMode: 'login', // 'login' | 'register'
+  measuresFilter: 'all',
 };
 
 const STEPS = ['テーマ選定', '一次情報', 'AIヒアリング', '記事構成・生成', '装飾・確認', '公開'];
@@ -149,6 +153,7 @@ function shell(innerHtml, { active = true, nav = true } = {}) {
       <div class="nav">
         <span class="${state.screen === 'dashboard' ? 'on' : ''}" data-nav="dashboard">ホーム</span>
         <span class="${state.screen === 'direction' ? 'on' : ''}" data-nav="direction">メディアの方向性</span>
+        ${state.accountsEnabled ? `<span class="${['measures', 'auth'].includes(state.screen) ? 'on' : ''}" data-nav="measures">施策管理</span>` : ''}
         <span data-nav="monitoring">記事一覧・監視</span>
         <span class="${state.screen === 'settings' ? 'on' : ''}" data-nav="settings">設定</span>
       </div>` : '';
@@ -167,6 +172,7 @@ function shell(innerHtml, { active = true, nav = true } = {}) {
       if (elm.dataset.nav === 'monitoring') renderMonitoring();
       if (elm.dataset.nav === 'direction') renderDirectionSummary();
       if (elm.dataset.nav === 'settings') renderSettings();
+      if (elm.dataset.nav === 'measures') (state.user ? renderMeasures() : renderAuth());
     });
   });
 }
@@ -1757,6 +1763,230 @@ async function renderFixDetail() {
 // ---------------------------------------------------------------
 // ブラウザの戻る/進むボタン対応【新設】：画面名 → 再描画関数のマッピング
 // ---------------------------------------------------------------
+// ---------------------------------------------------------------
+// アカウント・施策のステータス管理（ローカル版）
+// ログインしたアカウントごとに、施策（やること）と、その進み具合（ステータス）を管理する。
+// ---------------------------------------------------------------
+const STATUS_LIST = ['未着手', '対応中', '確認待ち', '完了'];
+const STATUS_PILL = { 未着手: 'grey', 対応中: 'gold', 確認待ち: 'blue', 完了: 'ok' };
+
+let measureCache = []; // 取得済みの施策（画面の描画用。保存の正はサーバー側）
+let editingId = null; // 編集中の施策
+let deletingId = null; // 削除の確認待ちの施策
+let measureDraft = { title: '', memo: '', status: '未着手' }; // 登録フォームの入力途中の内容
+
+async function measureApi(method, path, body) {
+  const res = await fetch(path, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    // ログインの有効期限切れ（サーバー再起動など）
+    state.user = null;
+    renderAuth('ログインの有効期限が切れました。もう一度ログインしてください');
+    const e = new Error('login_required');
+    e.handled = true;
+    throw e;
+  }
+  if (!res.ok) throw new Error(data.error || '処理に失敗しました');
+  return data;
+}
+
+function renderAuth(message) {
+  state.screen = 'auth';
+  const isReg = state.authMode === 'register';
+  shell(`
+    <div class="wrap" style="max-width:520px;">
+      <div class="screen-head">
+        <div class="eyebrow">アカウント</div>
+        <h1>${isReg ? 'アカウントを作成' : 'ログイン'}</h1>
+        <p>ログインすると、アカウントごとに、施策のステータスを管理できます。</p>
+      </div>
+      <div class="card">
+        <form class="auth-form" id="auth-form" autocomplete="on">
+          <label style="display:block;font-size:12.5px;font-weight:700;color:var(--sub);margin-bottom:4px;">ユーザー名</label>
+          <input id="auth-username" type="text" autocomplete="username" placeholder="半角の英数字（3〜50文字）" style="margin-bottom:12px;">
+          <label style="display:block;font-size:12.5px;font-weight:700;color:var(--sub);margin-bottom:4px;">パスワード</label>
+          <input id="auth-password" type="password" autocomplete="${isReg ? 'new-password' : 'current-password'}" placeholder="${isReg ? '8文字以上' : ''}">
+          <div id="auth-error" style="color:var(--danger);font-size:12.5px;margin:10px 0 0;">${esc(message || '')}</div>
+          <div class="btn-row">
+            <button class="btn navy" type="submit" id="auth-submit">${isReg ? 'アカウントを作成する' : 'ログイン'}</button>
+            <button class="btn ghost" type="button" id="auth-toggle">${isReg ? 'ログインへ' : '新しくアカウントを作る'}</button>
+          </div>
+        </form>
+        <div style="font-size:11px;color:var(--sub);margin-top:12px;">※このパソコンの中（data フォルダ）にだけ保存されます。パスワードは、読み取れない形（ハッシュ）にして保存します。</div>
+      </div>
+    </div>
+  `, { active: false });
+  document.getElementById('auth-toggle').addEventListener('click', () => { state.authMode = isReg ? 'login' : 'register'; renderAuth(); });
+  document.getElementById('auth-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errEl = document.getElementById('auth-error');
+    const btn = document.getElementById('auth-submit');
+    errEl.textContent = '';
+    btn.disabled = true;
+    try {
+      const res = await fetch(isReg ? '/api/auth/register' : '/api/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: document.getElementById('auth-username').value, password: document.getElementById('auth-password').value }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { errEl.textContent = data.error || 'ログインできませんでした'; return; }
+      state.user = data.user;
+      measureDraft = { title: '', memo: '', status: '未着手' };
+      renderMeasures();
+    } catch (err) {
+      errEl.textContent = 'サーバーに接続できませんでした';
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  pushHistory();
+}
+
+async function renderMeasures() {
+  state.screen = 'measures';
+  if (!state.user) { renderAuth(); return; }
+  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>読み込み中…</div></div>`, { active: false });
+  try {
+    ({ measures: measureCache } = await measureApi('GET', '/api/measures'));
+  } catch (e) {
+    if (!e.handled) showFatalError(e);
+    return;
+  }
+  editingId = null;
+  deletingId = null;
+  drawMeasures();
+  pushHistory();
+}
+
+// 描画前に、登録フォームの入力途中の内容を覚えておく（一覧の操作で再描画しても、消えないように）
+function captureMeasureDraft() {
+  const t = document.getElementById('m-title');
+  if (t) measureDraft = { title: t.value, memo: document.getElementById('m-memo').value, status: document.getElementById('m-status').value };
+}
+
+function drawMeasures({ keepDraft = true } = {}) {
+  if (keepDraft) captureMeasureDraft(); // 登録直後は、入力欄を空に戻したいので、画面上の内容を取り込まない
+  const filter = state.measuresFilter || 'all';
+  const counts = Object.fromEntries(STATUS_LIST.map((s) => [s, measureCache.filter((m) => m.status === s).length]));
+  const list = measureCache.filter((m) => filter === 'all' || m.status === filter);
+  const fmt = (iso) => new Date(iso).toLocaleString('ja-JP', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const options = (cur) => STATUS_LIST.map((s) => `<option value="${s}" ${s === cur ? 'selected' : ''}>${s}</option>`).join('');
+
+  const items = list.map((m) => {
+    if (m.id === editingId) {
+      return `<div class="card measure" data-id="${m.id}">
+        <input class="m-edit-title" type="text" maxlength="100" value="${esc(m.title)}" style="width:100%;font-family:inherit;font-size:14px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;box-sizing:border-box;">
+        <textarea class="m-edit-memo" rows="3" maxlength="2000" style="width:100%;font-family:inherit;font-size:13px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;box-sizing:border-box;">${esc(m.memo)}</textarea>
+        <div class="btn-row" style="margin-top:4px;"><button class="btn navy small" data-act="save">保存</button><button class="btn ghost small" data-act="cancel">キャンセル</button></div>
+      </div>`;
+    }
+    return `<div class="card measure" data-id="${m.id}">
+      <div class="top">
+        <div class="title">${esc(m.title)}</div>
+        <span class="pill ${STATUS_PILL[m.status]}">${esc(m.status)}</span>
+        <select data-act="status" aria-label="ステータスを変更">${options(m.status)}</select>
+      </div>
+      ${m.memo ? `<div class="memo">${esc(m.memo)}</div>` : ''}
+      <div class="meta">登録：${fmt(m.createdAt)} ／ 更新：${fmt(m.updatedAt)}</div>
+      <div class="btn-row" style="margin-top:2px;">
+        ${m.id === deletingId
+          ? '<span style="font-size:12.5px;color:var(--danger);align-self:center;">この施策を削除します。元に戻せません。</span><button class="btn danger-outline small" data-act="delete-yes">削除する</button><button class="btn ghost small" data-act="delete-no">やめる</button>'
+          : '<button class="btn ghost small" data-act="edit">編集</button><button class="btn ghost small" data-act="delete">削除</button>'}
+      </div>
+    </div>`;
+  }).join('');
+
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">施策管理</div>
+        <h1>施策のステータス管理</h1>
+        <p>ログイン中のアカウント（<b>${esc(state.user.username)}</b>）の施策だけが表示されます。 <a href="#" id="m-logout">ログアウト</a></p>
+      </div>
+      <div class="card m-form">
+        <h3 style="margin:0 0 8px;">施策を登録する</h3>
+        <div class="row"><input id="m-title" type="text" maxlength="100" placeholder="施策名（例：費用相場の記事をリライトする）" value="${esc(measureDraft.title)}"></div>
+        <div class="row"><textarea id="m-memo" rows="2" maxlength="2000" placeholder="メモ（任意）">${esc(measureDraft.memo)}</textarea></div>
+        <div class="row" style="align-items:center;">
+          <label style="font-size:12.5px;font-weight:700;color:var(--sub);">ステータス</label>
+          <select id="m-status">${options(measureDraft.status)}</select>
+          <button class="btn navy small" id="m-add">登録する</button>
+        </div>
+      </div>
+      <div class="chips">
+        <button class="chip ${filter === 'all' ? 'on' : ''}" data-filter="all">すべて（${measureCache.length}）</button>
+        ${STATUS_LIST.map((s) => `<button class="chip ${filter === s ? 'on' : ''}" data-filter="${s}">${s}（${counts[s]}）</button>`).join('')}
+      </div>
+      ${items || `<div class="card" style="color:var(--sub);font-size:13px;">${measureCache.length ? 'この条件に当てはまる施策はありません。' : 'まだ施策が登録されていません。上のフォームから登録してください。'}</div>`}
+    </div>
+  `, { active: false });
+
+  document.getElementById('m-logout').addEventListener('click', async (e) => {
+    e.preventDefault();
+    await fetch('/api/auth/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    state.user = null;
+    measureCache = [];
+    renderAuth('ログアウトしました');
+  });
+  document.getElementById('m-add').addEventListener('click', addMeasure);
+  document.getElementById('m-title').addEventListener('keydown', (e) => { if (e.key === 'Enter') addMeasure(); });
+  app.querySelectorAll('[data-filter]').forEach((b) => b.addEventListener('click', () => { state.measuresFilter = b.dataset.filter; drawMeasures(); }));
+  app.querySelectorAll('.measure').forEach((card) => {
+    const id = card.dataset.id;
+    card.querySelectorAll('[data-act]').forEach((el) => {
+      const act = el.dataset.act;
+      if (act === 'status') el.addEventListener('change', () => updateMeasure(id, { status: el.value }, `ステータスを「${el.value}」に変更しました`));
+      else el.addEventListener('click', () => {
+        if (act === 'edit') { editingId = id; drawMeasures(); }
+        else if (act === 'cancel') { editingId = null; drawMeasures(); }
+        else if (act === 'save') updateMeasure(id, { title: card.querySelector('.m-edit-title').value, memo: card.querySelector('.m-edit-memo').value }, '変更を保存しました', true);
+        else if (act === 'delete') { deletingId = id; drawMeasures(); }
+        else if (act === 'delete-no') { deletingId = null; drawMeasures(); }
+        else if (act === 'delete-yes') deleteMeasure(id);
+      });
+    });
+  });
+}
+
+async function addMeasure() {
+  captureMeasureDraft();
+  if (!measureDraft.title.trim()) { toast('施策名を入力してください'); return; }
+  try {
+    const { measure } = await measureApi('POST', '/api/measures', measureDraft);
+    measureCache.unshift(measure);
+    measureDraft = { title: '', memo: '', status: '未着手' };
+    drawMeasures({ keepDraft: false });
+    toast('施策を登録しました');
+  } catch (e) {
+    if (!e.handled) toast(e.message);
+  }
+}
+
+async function updateMeasure(id, patch, message, leaveEdit) {
+  try {
+    const { measure } = await measureApi('PUT', `/api/measures/${id}`, patch);
+    measureCache = measureCache.map((m) => (m.id === id ? measure : m)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    if (leaveEdit) editingId = null;
+    drawMeasures();
+    toast(message);
+  } catch (e) {
+    if (!e.handled) { toast(e.message); drawMeasures(); }
+  }
+}
+
+async function deleteMeasure(id) {
+  try {
+    await measureApi('DELETE', `/api/measures/${id}`);
+    measureCache = measureCache.filter((m) => m.id !== id);
+    deletingId = null;
+    drawMeasures();
+    toast('施策を削除しました');
+  } catch (e) {
+    if (!e.handled) toast(e.message);
+  }
+}
+
 const SCREEN_RENDERERS = {
   mediaState: renderMediaState,
   understandExistingForm: renderExistingUnderstand,
@@ -1782,6 +2012,8 @@ const SCREEN_RENDERERS = {
   monitoring: renderMonitoring,
   fixDetail: renderFixDetail,
   settings: renderSettings,
+  measures: renderMeasures,
+  auth: () => renderAuth(),
 };
 
 window.addEventListener('popstate', (e) => {
@@ -1799,6 +2031,9 @@ window.addEventListener('popstate', (e) => {
     const { aiEnabled, gscEnabled } = await api('/api/themes');
     state.aiEnabled = !!aiEnabled;
     state.gscEnabled = !!gscEnabled;
+    const me = await api('/api/auth/me');
+    state.accountsEnabled = !!me.enabled;
+    state.user = me.user;
   } catch (e) { /* サーバー未接続でも最初の画面は表示する */ }
   if (!handleGscReturn()) renderMediaState();
 })();
