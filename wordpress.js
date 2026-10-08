@@ -10,6 +10,8 @@ function normalizeSite(input) {
   if (!s) throw new Error('サイトURLを入力してください');
   if (!/^https?:\/\//i.test(s)) s = `https://${s}`;
   const u = new URL(s);
+  // 認証情報を平文で送らないよう、httpのURLはhttpsに切り替える（自動テスト用のローカルの擬似サーバーを除く）
+  if (u.protocol === 'http:' && process.env.ALLOW_LOCAL_TARGETS !== '1') u.protocol = 'https:';
   return `${u.origin}${u.pathname.replace(/\/+$/, '')}`; // 末尾の/を除く（サブディレクトリ運用のWordPressにも対応）
 }
 
@@ -27,13 +29,13 @@ function apiUrl(cfg, route) {
   return `${cfg.siteUrl}/wp-json${r}`;
 }
 
-async function request(cfg, route, { method = 'GET', headers = {}, body, timeoutMs = 30000 } = {}) {
+async function request(cfg, route, { method = 'GET', headers = {}, body, timeoutMs = 30000, noAuth = false } = {}) {
   const url = apiUrl(cfg, route);
   await assertPublicUrl(new URL(url)); // 内部ネットワーク等への接続を防ぐ
   const res = await fetch(url, {
     method,
     redirect: 'manual', // 認証情報を別ホストに送らないため、リダイレクトは追わない
-    headers: { authorization: authHeader(cfg), accept: 'application/json', ...headers },
+    headers: { ...(noAuth ? {} : { authorization: authHeader(cfg) }), accept: 'application/json', ...headers },
     body,
     signal: AbortSignal.timeout(timeoutMs),
   });
@@ -58,6 +60,19 @@ async function request(cfg, route, { method = 'GET', headers = {}, body, timeout
   return data;
 }
 
+// 認証に失敗したとき、サイトがアプリケーションパスワード自体に対応しているかを調べ、原因に合った案内を返す
+async function explainAuthFailure(cfg) {
+  try {
+    const root = await request(cfg, '/', { noAuth: true });
+    const auth = root.authentication;
+    const supported = auth && !Array.isArray(auth) && auth['application-passwords'];
+    if (!supported) {
+      return 'このWordPressサイトは、アプリケーションパスワードに対応していない状態です（入力内容の間違いではありません）。管理画面の「ユーザー」→「プロフィール」に「アプリケーションパスワード」の欄が無ければ、使えません。主な原因は、WordPressのバージョンが古い（5.6より前）、サイトのHTTPS設定が正しくない、セキュリティ系のプラグインなどで無効にされている、のいずれかです。サイトの管理者に確認してください。';
+    }
+  } catch { /* 原因を特定できなければ、通常の案内にする */ }
+  return null;
+}
+
 // 接続の確認：REST APIが使え、ユーザーに投稿権限があるかを調べる
 async function connect(siteInput, username, appPassword) {
   const user = String(username || '').trim();
@@ -70,6 +85,11 @@ async function connect(siteInput, username, appPassword) {
   try {
     me = await request(cfg, '/wp/v2/users/me?context=edit');
   } catch (e) {
+    if (e.status === 401) {
+      const why = await explainAuthFailure(cfg);
+      if (why) throw new Error(why);
+      throw new Error('ユーザー名またはアプリケーションパスワードが正しくありません。ログイン用のパスワードではなく、WordPressの「ユーザー」→「プロフィール」で発行した「アプリケーションパスワード」（英数字24文字。4文字ずつ空白で区切って表示されます）を入力してください');
+    }
     // パーマリンクが「基本」の場合は ?rest_route= 形式でしか届かないため、もう一度試す
     if (e.status === 404 || /REST API/.test(e.message)) {
       cfg.plain = true;
