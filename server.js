@@ -215,9 +215,17 @@ async function getStructured({ system, user, simulate, label }) {
 // ---------------------------------------------------------------
 // ルート: 起点（メディア状態判定 → メディア理解 → 方向性設計）【新設・v2】
 // ---------------------------------------------------------------
+// ログインしているアカウントの、メディア（分析の作業単位）だけを返す。他のアカウントのものは、存在しないものとして扱う。
+function ownedMedia(req, mediaId) {
+  const m = mediaProfiles.get(mediaId);
+  if (!m) return null;
+  if (m.userId && m.userId !== req.user?.id) return null;
+  return m;
+}
+
 function getMediaProfile(req, res) {
   const { mediaId } = req.body || {};
-  const m = mediaProfiles.get(mediaId);
+  const m = ownedMedia(req, mediaId);
   if (!m) {
     res.status(404).json({ error: 'media profile not found' });
     return null;
@@ -233,6 +241,7 @@ app.post('/api/media/state', (req, res) => {
   const mediaId = newId('media');
   mediaProfiles.set(mediaId, {
     id: mediaId,
+    userId: req.user?.id || null, // アカウント機能が有効なときは、作成したアカウントのものになる
     mediaState,
     siteUrl: null,
     businessInfo: null,
@@ -250,7 +259,7 @@ app.post('/api/media/state', (req, res) => {
 // Google Search Console 連携（OAuth）。GOOGLE_CLIENT_ID/SECRET 未設定の間は無効で、画面は従来のデモ表示。
 // ---------------------------------------------------------------
 function getMediaByQuery(req, res) {
-  const m = mediaProfiles.get(req.query.mediaId);
+  const m = ownedMedia(req, req.query.mediaId);
   if (!m) { res.status(404).json({ error: 'media profile not found' }); return null; }
   return m;
 }
@@ -262,7 +271,7 @@ app.get('/api/gsc/info', (req, res) => {
 
 // 設定画面などで表示する、現在の実連携の状況（シークレットやトークンは返さない）
 app.post('/api/gsc/status', (req, res) => {
-  const m = mediaProfiles.get(req.body?.mediaId);
+  const m = ownedMedia(req, req.body?.mediaId);
   res.json(m?.gsc ? { connected: true, account: m.gsc.email, siteUrl: m.gsc.siteUrl, connectedAt: m.gsc.connectedAt } : { connected: false });
 });
 
@@ -421,7 +430,7 @@ app.post('/api/wordpress/connect', async (req, res) => {
 });
 
 app.post('/api/wordpress/status', (req, res) => {
-  const w = mediaProfiles.get(req.body?.mediaId)?.wordpress;
+  const w = ownedMedia(req, req.body?.mediaId)?.wordpress;
   res.json(w?.real ? { connected: true, siteUrl: w.siteUrl, siteName: w.siteName, userName: w.userName, canUpload: w.canUpload } : { connected: false });
 });
 
@@ -587,8 +596,8 @@ app.get('/api/themes', async (req, res) => {
   let themesMode = 'fixed';
   let direction = null;
   const mediaId = req.query.mediaId;
-  if (mediaId && mediaProfiles.has(mediaId)) {
-    const m = mediaProfiles.get(mediaId);
+  if (mediaId && ownedMedia(req, mediaId)) {
+    const m = ownedMedia(req, mediaId);
     if (m.topicClusters) {
       direction = { mediaState: m.mediaState, clusters: m.topicClusters, topCluster: topClusterOf(m.topicClusters) };
       if (AI_ENABLED && (!m.themes || req.query.refresh)) {
@@ -606,7 +615,7 @@ app.get('/api/themes', async (req, res) => {
 
 app.post('/api/session', (req, res) => {
   const { themeId, mediaId } = req.body || {};
-  const m = mediaId ? mediaProfiles.get(mediaId) : null;
+  const m = mediaId ? ownedMedia(req, mediaId) : null;
   const theme = (m?.themes?.themes || fixedThemesFor()).find((t) => t.id === themeId);
   if (!theme) return res.status(400).json({ error: 'invalid themeId' });
 
@@ -619,6 +628,7 @@ app.post('/api/session', (req, res) => {
   const sessionId = newId('sess');
   sessions.set(sessionId, {
     id: sessionId,
+    userId: req.user?.id || null,
     mediaId: m ? m.id : null,
     theme,
     availablePrimaryInfo,
@@ -634,7 +644,7 @@ app.post('/api/session', (req, res) => {
 function getSession(req, res) {
   const { sessionId } = req.body || {};
   const s = sessions.get(sessionId);
-  if (!s) {
+  if (!s || (s.userId && s.userId !== req.user?.id)) {
     res.status(404).json({ error: 'session not found' });
     return null;
   }

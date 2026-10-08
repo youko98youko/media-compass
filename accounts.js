@@ -161,6 +161,17 @@ function install(app) {
     res.json({ ok: true });
   });
 
+  // ---- ログイン必須：ログイン・アカウント作成・起動時の設定確認・Googleからの戻り先以外のAPIは、ログインしていないと使えない ----
+  // （この下で定義される、メディア分析・記事作成・設定などのAPIすべてが対象）
+  app.use('/api', (req, res, next) => {
+    if (!ENABLED) return next();
+    const user = currentUser(req);
+    req.user = user;
+    const open = req.path.startsWith('/auth/') || req.path === '/gsc/callback' || (req.path === '/themes' && !req.query.mediaId);
+    if (open || user) return next();
+    res.status(401).json({ error: 'login_required' });
+  });
+
   // ---- 施策のステータス管理（ログイン中のアカウント自身のデータだけを扱う） ----
   const mine = (user) => db.measures.filter((m) => m.userId === user.id);
   const view = ({ userId, ...m }) => m;

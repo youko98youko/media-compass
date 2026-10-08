@@ -55,11 +55,20 @@ async function api(path, opts) {
   } catch (networkErr) {
     throw new Error('NO_SERVER');
   }
+  if (res.status === 401) {
+    // ログインしていない、または有効期限切れ（サーバー再起動など）。ログイン画面へ戻す
+    state.user = null;
+    renderAuth('ログインが必要です。ログインしてください');
+    const e = new Error('login_required');
+    e.authExpired = true;
+    throw e;
+  }
   if (!res.ok) throw new Error(`API error ${res.status} on ${path}`);
   return res.json();
 }
 
 function showFatalError(err) {
+  if (err && err.authExpired) return; // ログイン画面に切り替え済み
   const isNoServer = err && err.message === 'NO_SERVER';
   app.innerHTML = `
     <div class="wrap" style="max-width:640px; padding-top:60px;">
@@ -164,11 +173,17 @@ function shell(innerHtml, { active = true, nav = true } = {}) {
     <div class="appbar">
       <span class="brand">メディアコンパス極</span>
       ${navHtml}
+      ${state.user ? `<span class="acct">👤 ${esc(state.user.username)} <a href="#" data-logout>ログアウト</a></span>` : ''}
       <span class="mode-badge ${state.aiEnabled ? 'ai' : 'sim'}"><span class="dot"></span>${state.aiEnabled ? 'AI連携中（ChatGPT）' : 'シミュレーションモード'}</span>
     </div>
     ${stepperHtml}
     ${innerHtml}
   `;
+  app.querySelectorAll('[data-logout]').forEach((a) => a.addEventListener('click', async (e) => {
+    e.preventDefault();
+    await fetch('/api/auth/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    location.reload();
+  }));
   app.querySelectorAll('[data-nav]').forEach((elm) => {
     elm.addEventListener('click', () => {
       if (elm.dataset.nav === 'dashboard') renderDashboard();
@@ -196,15 +211,15 @@ function renderMediaState() {
         <h3>既存メディアを分析する</h3>
         <div style="font-size:12.5px;color:var(--sub);">サイトURL・Google Search Consoleのデータから、現状を分析します。</div>
       </div>
-      <div class="card clickable" id="pick-new">
-        <h3>新しくメディアを構築する</h3>
-        <div style="font-size:12.5px;color:var(--sub);">事業内容についてAIがヒアリングし、ゼロから方向性を設計します。</div>
+      <div class="card" id="pick-new" style="opacity:.6;cursor:not-allowed;">
+        <h3>新しくメディアを構築する <span class="pill grey">準備中</span></h3>
+        <div style="font-size:12.5px;color:var(--sub);">事業内容についてAIがヒアリングし、ゼロから方向性を設計します。（既存メディアの構築が終わってから、設計に着手します）</div>
       </div>
       <div style="font-size:11px;color:var(--sub);margin-top:6px;">※新規／既存の判定はユーザーが手動で選択します（自動判定はしません）。</div>
     </div>
   `, { active: false, nav: false });
   document.getElementById('pick-existing').addEventListener('click', () => pickMediaState('existing'));
-  document.getElementById('pick-new').addEventListener('click', () => pickMediaState('new'));
+  document.getElementById('pick-new').addEventListener('click', () => toast('新しくメディアを構築する機能は、準備中です'));
   pushHistory();
 }
 
@@ -1801,7 +1816,7 @@ function renderAuth(message) {
       <div class="screen-head">
         <div class="eyebrow">アカウント</div>
         <h1>${isReg ? 'アカウントを作成' : 'ログイン'}</h1>
-        <p>ログインすると、アカウントごとに、施策のステータスを管理できます。</p>
+        <p>ご利用にはアカウントが必要です。ログインすると、アカウントごとに、メディアの分析や施策のステータスを管理できます。</p>
       </div>
       <div class="card">
         <form class="auth-form" id="auth-form" autocomplete="on">
@@ -1834,9 +1849,7 @@ function renderAuth(message) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) { errEl.textContent = data.error || 'ログインできませんでした'; return; }
-      state.user = data.user;
-      measureDraft = { title: '', memo: '', status: '未着手' };
-      renderMeasures();
+      location.reload(); // 前のアカウントの作業内容が残らないよう、画面の状態を作り直して「メディアを選ぶ」画面へ
     } catch (err) {
       errEl.textContent = 'サーバーに接続できませんでした';
     } finally {
@@ -1927,9 +1940,7 @@ function drawMeasures({ keepDraft = true } = {}) {
   document.getElementById('m-logout').addEventListener('click', async (e) => {
     e.preventDefault();
     await fetch('/api/auth/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
-    state.user = null;
-    measureCache = [];
-    renderAuth('ログアウトしました');
+    location.reload(); // ログイン画面に戻る（作業内容も消す）
   });
   document.getElementById('m-add').addEventListener('click', addMeasure);
   document.getElementById('m-title').addEventListener('keydown', (e) => { if (e.key === 'Enter') addMeasure(); });
@@ -2037,5 +2048,6 @@ window.addEventListener('popstate', (e) => {
     state.accountsEnabled = !!me.enabled;
     state.user = me.user;
   } catch (e) { /* サーバー未接続でも最初の画面は表示する */ }
-  if (!handleGscReturn()) renderMediaState();
+  if (state.accountsEnabled && !state.user) renderAuth(); // アカウント機能が有効なときは、ログイン（アカウント作成）が必須
+  else if (!handleGscReturn()) renderMediaState();
 })();
