@@ -156,7 +156,10 @@ function shell(innerHtml, { active = true, nav = true } = {}) {
         ${state.accountsEnabled ? `<span class="${['measures', 'auth'].includes(state.screen) ? 'on' : ''}" data-nav="measures">施策管理</span>` : ''}
         <span data-nav="monitoring">記事一覧・監視</span>
         <span class="${state.screen === 'settings' ? 'on' : ''}" data-nav="settings">設定</span>
-      </div>` : '';
+      </div>` : state.accountsEnabled ? `
+      <div class="nav">
+        <span class="${['measures', 'auth'].includes(state.screen) ? 'on' : ''}" data-nav="measures">施策管理</span>
+      </div>` : ''; // 最初の画面などメニューを出さない画面でも、アカウント機能（施策管理）への入口だけは出す
   app.innerHTML = `
     <div class="appbar">
       <span class="brand">メディアコンパス極</span>
