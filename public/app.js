@@ -522,7 +522,18 @@ function renderWordpressConnect() {
         <div class="info-box" style="margin:10px 0;">
           <div class="h">安全のため、投稿は「下書き」までです</div>このアプリから記事を公開することはありません。投稿された下書きを、WordPressの管理画面で確認して、公開してください。
         </div>
-        <details style="margin:10px 0;">
+        <div class="field-grid" style="margin-bottom:6px;">
+          <div class="k">接続方式</div>
+          <div class="v" style="font-size:12.5px;line-height:1.7;">
+            <label><input type="radio" name="wp-method" value="rest" checked> アプリケーションパスワード（WordPress 5.6以降。おすすめ）</label><br>
+            <label><input type="radio" name="wp-method" value="xmlrpc"> ログイン用パスワード（XML-RPC。WordPress 5.6より前の古いサイト向け）</label>
+          </div>
+        </div>
+        <div class="missing-box" id="wp-xmlrpc-note" style="margin:8px 0;" hidden>
+          <div class="h">XML-RPC方式を使うときの注意</div>
+          このサイトのログイン用パスワードを使います。<b>管理者のアカウントは使わず、このアプリ専用に、権限グループが「投稿者」のユーザーを新しく作って</b>、そのユーザーの情報を入力してください（「寄稿者」では、画像をアップロードできません）。パスワードは、この接続のためにサーバーのメモリ上にだけ保持し、ブラウザには保存しません。
+        </div>
+        <details style="margin:10px 0;" id="wp-rest-guide">
           <summary style="cursor:pointer;font-size:12.5px;font-weight:700;color:var(--sub);">アプリケーションパスワードの発行手順</summary>
           <ol style="font-size:12.5px;line-height:1.8;margin:8px 0 0 18px;padding:0;">
             <li>WordPressの管理画面に、投稿に使うユーザーでログインする。</li>
@@ -535,7 +546,7 @@ function renderWordpressConnect() {
         <div class="field-grid">
           <div class="k">サイトURL</div><div class="v"><input id="wp-site-url" type="text" value="${esc(state.wordpressSiteUrl || '')}" placeholder="https://example.co.jp" style="${input}"></div>
           <div class="k">ユーザー名</div><div class="v"><input id="wp-username" type="text" autocomplete="off" placeholder="WordPressのユーザー名" style="${input}"></div>
-          <div class="k">アプリケーションパスワード</div><div class="v"><input id="wp-app-password" type="password" autocomplete="off" placeholder="xxxx xxxx xxxx xxxx xxxx xxxx" style="${input}"></div>
+ <div class="k" id="wp-pw-label">アプリケーションパスワード</div><div class="v"><input id="wp-app-password" type="password" autocomplete="off" placeholder="xxxx xxxx xxxx xxxx xxxx xxxx" style="${input}"></div>
         </div>
         <div style="font-size:10.5px;color:var(--sub);margin:8px 0 4px;">※入力した情報は、この接続のためにサーバーのメモリ上にだけ保持します（ブラウザには保存せず、サーバーを再起動すると消えます）。一度接続すると、次回からはこの画面は表示されません。</div>
         ${isLocal ? '' : '<div class="missing-box" style="margin:8px 0;"><div class="h">このサイトは誰でもアクセスできる公開環境です</div>パスワードは秘密の情報です。公開環境での入力はおすすめしません。実際の接続は、ご自身のパソコンで動かすプロトタイプ（localhost:3000）で行ってください。</div>'}
@@ -548,6 +559,16 @@ function renderWordpressConnect() {
       </div>
     </div>
   `, { active: false, nav: false });
+
+  const methodOf = () => (app.querySelector('input[name="wp-method"]:checked') || {}).value || 'rest';
+  const applyMethod = () => {
+    const x = methodOf() === 'xmlrpc';
+    document.getElementById('wp-xmlrpc-note').hidden = !x;
+    document.getElementById('wp-rest-guide').hidden = x;
+    document.getElementById('wp-pw-label').textContent = x ? 'パスワード（ログイン用）' : 'アプリケーションパスワード';
+    document.getElementById('wp-app-password').placeholder = x ? '投稿専用ユーザーのログイン用パスワード' : 'xxxx xxxx xxxx xxxx xxxx xxxx';
+  };
+  app.querySelectorAll('input[name="wp-method"]').forEach((r) => r.addEventListener('change', applyMethod));
 
   const afterConnect = () => {
     if (isPublish) doPublish();
@@ -567,6 +588,7 @@ function renderWordpressConnect() {
         body: JSON.stringify({
           mediaId: state.mediaId,
           siteUrl,
+          method: methodOf(),
           username: document.getElementById('wp-username').value,
           appPassword: document.getElementById('wp-app-password').value,
         }),
@@ -574,9 +596,16 @@ function renderWordpressConnect() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         errEl.textContent = data.error || '接続できませんでした';
+        // サイトがアプリケーションパスワードに対応していない場合は、XML-RPC方式を案内する
+        if (methodOf() === 'rest' && /アプリケーションパスワードに対応していない/.test(errEl.textContent)) {
+          errEl.textContent += ' → 古いWordPressでも使える「ログイン用パスワード（XML-RPC）」方式を、選び直しました。投稿専用のユーザーを作って、もう一度お試しください。';
+          app.querySelector('input[name="wp-method"][value="xmlrpc"]').checked = true;
+          applyMethod();
+        }
         return;
       }
       state.wordpressSiteUrl = data.siteUrl;
+      state.wordpressMethod = data.method;
       state.wordpressConnected = true;
       state.wordpressReal = true;
       afterConnect();
@@ -976,8 +1005,10 @@ async function renderSettings() {
             <div class="h">接続中（実際のWordPressと連携）</div>
             サイト：${esc(wpStatus.siteName || '')} ${esc(wpStatus.siteUrl)}<br>
             ユーザー：${esc(wpStatus.userName || '')}<br>
+            接続方式：${wpStatus.method === 'xmlrpc' ? 'ログイン用パスワード（XML-RPC）' : 'アプリケーションパスワード'}<br>
             投稿の種類：下書きのみ${wpStatus.canUpload ? '（画像のアップロード可）' : '（このユーザーは画像をアップロードできません）'}
           </div>
+          ${wpStatus.isAdmin ? '<div class="missing-box" style="margin-top:8px;"><div class="h">管理者権限のユーザーで接続しています</div>安全のため、このアプリ専用の、権限が「投稿者」のユーザーでの接続をおすすめします。</div>' : ''}
           <div class="btn-row">
             <button class="btn outline" id="wp-connect-settings">接続し直す</button>
             <button class="btn ghost" id="wp-disconnect">接続を解除する</button>
@@ -1454,6 +1485,7 @@ function renderArticleEdit() {
         ${blocksHtml}
         <div class="btn-row">
           <button class="btn ghost" id="save-draft">編集内容を保存</button>
+          <button class="btn outline" id="go-export">WordPress用のHTMLを書き出す</button>
           <button class="btn gold" id="go-publish">${state.wordpressConnected && state.wordpressReal ? 'WordPressに下書き保存 →' : '公開する →'}</button>
         </div>
       </div>
@@ -1471,6 +1503,7 @@ function renderArticleEdit() {
   state.article.blocks.forEach((b, i) => { if (b.type === 'image') bindImageButton(i); });
   const genAll = document.getElementById('gen-all-images');
   if (genAll) genAll.addEventListener('click', generateAllImages);
+  document.getElementById('go-export').addEventListener('click', renderExport);
   document.getElementById('save-draft').addEventListener('click', async () => {
     await api('/api/article/save', { body: { sessionId: state.sessionId, article: state.article } });
     toast('編集内容を保存しました');
@@ -1490,6 +1523,78 @@ function renderArticleEdit() {
     state.autoImagesFor = state.sessionId;
     generateAllImages();
   }
+}
+
+// ---------------------------------------------------------------
+// WordPress用HTMLの書き出し：WordPressに接続できない（または接続したくない）場合に、
+// 記事を、コピー＆貼り付けで WordPress に入れられる形で出力する。
+// ---------------------------------------------------------------
+async function copyText(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('コピーしました');
+  } catch (e) {
+    toast('コピーできませんでした。枠内の文字を選択して、コピーしてください');
+  }
+}
+
+async function renderExport() {
+  state.screen = 'export';
+  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>書き出しの準備をしています…</div></div>`);
+  let data;
+  try {
+    await api('/api/article/save', { body: { sessionId: state.sessionId, article: state.article } });
+    data = await api('/api/article/export-html', { body: { sessionId: state.sessionId } });
+  } catch (e) {
+    showFatalError(e);
+    return;
+  }
+  const box = 'width:100%;box-sizing:border-box;font-family:monospace;font-size:12px;padding:10px;border:1px solid var(--line);border-radius:8px;background:#f8fafc;';
+  const imgRows = data.images.map((im) => `
+    <div style="display:flex;gap:12px;align-items:center;padding:8px 0;border-top:1px solid var(--line);flex-wrap:wrap;">
+      ${im.src ? `<img src="${esc(im.src)}" alt="" style="width:120px;border-radius:6px;">` : '<div style="width:120px;height:72px;border-radius:6px;background:#eceff3;color:#8890a0;font-size:11px;display:flex;align-items:center;justify-content:center;">未生成</div>'}
+      <div style="flex:1;min-width:200px;">
+        <div style="font-weight:700;font-size:12.5px;">${esc(im.role)}</div>
+        <div style="font-size:12px;color:var(--sub);">代替テキスト：${esc(im.alt)}</div>
+      </div>
+      ${im.src ? `<a class="btn outline small" href="${esc(im.src)}" download="${esc(im.filename)}">画像を保存（${esc(im.filename)}）</a>` : '<span style="font-size:11.5px;color:var(--sub);">編集画面で、画像を生成してください</span>'}
+    </div>`).join('');
+
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">STEP 9 ・ WordPress用に書き出す</div>
+        <h1>WordPressに貼り付けるための内容</h1>
+        <p>WordPressに接続しなくても、次の手順で、記事を WordPress に入れられます。</p>
+      </div>
+      <div class="card">
+        <div class="info-box"><div class="h">貼り付けの手順</div>
+          <ol style="margin:4px 0 0 18px;padding:0;line-height:1.8;">
+            <li>WordPressの管理画面で「投稿」→「新規追加」を開く。</li>
+            <li>下の「タイトル」を、タイトル欄に貼り付ける。</li>
+            <li>本文の編集を「テキスト」（HTML）モードにして、下の「本文のHTML」を貼り付ける（クラシックエディターの場合は、右上の「テキスト」タブ）。</li>
+            <li>「画像を保存」で保存した画像を、「メディアを追加」からアップロードし、本文の【ここに画像を挿入】の位置に入れる。</li>
+            <li>アイキャッチ画像を、右側の「アイキャッチ画像を設定」から設定する。</li>
+            <li>内容を確認して、「下書きとして保存」または「公開」を押す（このアプリは公開しません）。</li>
+          </ol>
+        </div>
+        <h3 style="margin:14px 0 6px;">タイトル</h3>
+        <input id="exp-title" type="text" readonly value="${esc(data.title)}" style="${box}font-family:inherit;font-size:13.5px;">
+        <div class="btn-row" style="margin-top:6px;"><button class="btn navy small" id="copy-title">タイトルをコピー</button></div>
+        <h3 style="margin:14px 0 6px;">本文のHTML</h3>
+        <textarea id="exp-html" readonly rows="14" style="${box}">${esc(data.html)}</textarea>
+        <div class="btn-row" style="margin-top:6px;"><button class="btn navy small" id="copy-html">本文のHTMLをコピー</button></div>
+        <h3 style="margin:14px 0 4px;">画像</h3>
+        ${imgRows || '<div style="font-size:12.5px;color:var(--sub);">この記事に、画像はありません。</div>'}
+        <div class="btn-row"><button class="btn ghost" id="exp-back">← 編集画面に戻る</button></div>
+      </div>
+    </div>
+  `);
+  document.getElementById('copy-title').addEventListener('click', () => copyText(data.title));
+  document.getElementById('copy-html').addEventListener('click', () => copyText(data.html));
+  document.getElementById('exp-html').addEventListener('focus', (e) => e.target.select());
+  document.getElementById('exp-back').addEventListener('click', renderArticleEdit);
+  pushHistory();
 }
 
 async function regenerateBlock(idx) {
@@ -2021,6 +2126,7 @@ const SCREEN_RENDERERS = {
   articleEdit: renderArticleEdit,
   published: renderPublishedStatus,
   publishError: () => renderPublishError(state.publishErrorMessage || ''),
+  export: renderExport,
   mediaPage: () => renderMediaPage(state.publishInfo && state.publishInfo.articleId),
   monitoring: renderMonitoring,
   fixDetail: renderFixDetail,

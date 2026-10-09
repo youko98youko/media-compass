@@ -419,11 +419,13 @@ app.post('/api/media/wordpress-connect', (req, res) => {
 app.post('/api/wordpress/connect', async (req, res) => {
   const m = getMediaProfile(req, res);
   if (!m) return;
-  const { siteUrl, username, appPassword } = req.body || {};
+  const { siteUrl, username, appPassword, method } = req.body || {};
   try {
-    const r = await wordpress.connect(siteUrl, username, appPassword);
-    m.wordpress = { connected: true, real: true, siteUrl: r.cfg.siteUrl, siteName: r.siteName, userName: r.userName, canUpload: r.canUpload, cfg: r.cfg };
-    res.json({ ok: true, siteUrl: r.cfg.siteUrl, siteName: r.siteName, userName: r.userName, canUpload: r.canUpload });
+    // method: 'rest'（アプリケーションパスワード。WordPress 5.6以降）／'xmlrpc'（ログイン用パスワード。古いWordPress向け）
+    const r = method === 'xmlrpc' ? await wordpress.connectXmlRpc(siteUrl, username, appPassword) : await wordpress.connect(siteUrl, username, appPassword);
+    const kind = method === 'xmlrpc' ? 'xmlrpc' : 'rest';
+    m.wordpress = { connected: true, real: true, method: kind, siteUrl: r.cfg.siteUrl, siteName: r.siteName, userName: r.userName, canUpload: r.canUpload, isAdmin: !!r.isAdmin, cfg: r.cfg };
+    res.json({ ok: true, method: kind, siteUrl: r.cfg.siteUrl, siteName: r.siteName, userName: r.userName, canUpload: r.canUpload, isAdmin: !!r.isAdmin });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -431,7 +433,7 @@ app.post('/api/wordpress/connect', async (req, res) => {
 
 app.post('/api/wordpress/status', (req, res) => {
   const w = ownedMedia(req, req.body?.mediaId)?.wordpress;
-  res.json(w?.real ? { connected: true, siteUrl: w.siteUrl, siteName: w.siteName, userName: w.userName, canUpload: w.canUpload } : { connected: false });
+  res.json(w?.real ? { connected: true, method: w.method || 'rest', siteUrl: w.siteUrl, siteName: w.siteName, userName: w.userName, canUpload: w.canUpload, isAdmin: !!w.isAdmin } : { connected: false });
 });
 
 app.post('/api/wordpress/disconnect', (req, res) => {
@@ -860,6 +862,29 @@ app.get('/api/image/:id', (req, res) => {
   res.send(img.buffer);
 });
 
+// WordPressに接続せず、記事を「WordPress用のHTML」として書き出す（本文HTML・タイトル・画像の一覧）。
+// 画像は、WordPressの「メディアを追加」でアップロードして、HTML内の目印の位置に挿入する。
+app.post('/api/article/export-html', (req, res) => {
+  const s = getSession(req, res);
+  if (!s) return;
+  if (!s.article) return res.status(400).json({ error: 'article not generated yet' });
+  const blocks = s.article.blocks || [];
+  const imageList = [];
+  blocks.forEach((b, i) => {
+    if (b.type !== 'image') return;
+    const img = images.getBySrc(b.src);
+    const n = imageList.length + 1;
+    imageList.push({
+      index: i,
+      role: b.role === 'hero' ? 'アイキャッチ画像' : '本文中の画像',
+      alt: b.alt || '',
+      src: img ? b.src : null, // 未生成の仮画像は、書き出さない
+      filename: img ? `image-${n}-${b.role === 'hero' ? 'hero' : 'inline'}.${img.mime === 'image/png' ? 'png' : 'jpg'}` : null,
+    });
+  });
+  res.json({ title: s.article.title, html: wordpress.blocksToHtml(blocks, {}, { placeholders: true }), images: imageList });
+});
+
 // 記事をWordPressへ「下書き」として投稿する（画像は先にメディアライブラリへアップロードする）
 async function publishToWordPress(s, wp) {
   s.wpMedia = s.wpMedia || {}; // 画像URL -> アップロード済みのメディア（再投稿時に重複アップロードしない）
@@ -892,6 +917,7 @@ async function publishToWordPress(s, wp) {
   s.wpDraftId = draft.id;
   return {
     mode: 'wordpress-draft',
+    method: wp.method || 'rest',
     siteUrl: wp.siteUrl,
     siteName: wp.siteName,
     draftId: draft.id,
