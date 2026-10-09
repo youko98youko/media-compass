@@ -228,7 +228,7 @@ async function xmlrpc(cfg, method, params, { timeoutMs = 60000 } = {}) {
     const f = parseValue($, fault.get(0));
     const code = Number(f.faultCode);
     let msg = String(f.faultString || '');
-    if (code === 403) msg = 'ユーザー名またはパスワードが正しくありません。まず、WordPressのログイン画面（サイトURL/wp-login.php）で、同じユーザー名・パスワードでログインできるか確認してください。ユーザー名は、メールアドレスや表示名ではなく、ログイン用の「ユーザー名」です。コピーしたときに、前後に空白が入っていないか、l（エル）とI（アイ）、0（ゼロ）とO（オー）の取り違えがないかも、確認してください';
+    if (code === 403) msg = `ユーザー名またはパスワードが正しくありません（アプリが送信した内容：ユーザー名「${cfg.username}」、パスワード${String(cfg.password || '').length}文字、前後の空白${/^\s|\s$/.test(String(cfg.password || '')) ? 'あり' : 'なし'}）。まず、WordPressのログイン画面（サイトURL/wp-login.php）で、同じユーザー名・パスワードでログインできるか確認してください。ユーザー名は、メールアドレスや表示名ではなく、ログイン用の「ユーザー名」です。コピーしたときに、前後に空白が入っていないか、l（エル）とI（アイ）、0（ゼロ）とO（オー）の取り違えがないかも、確認してください`;
     else if (code === 401) msg = 'このユーザーには、この操作を行う権限がありません（投稿者以上の権限が必要です。画像のアップロードには、「寄稿者」ではなく「投稿者」以上が必要です）';
     const err = new Error(msg || 'WordPressでエラーが発生しました');
     err.status = code;
@@ -245,12 +245,23 @@ async function connectXmlRpc(siteInput, username, password) {
   if (!pass) throw new Error('パスワードを入力してください');
   const cfg = { method: 'xmlrpc', siteUrl: normalizeSite(siteInput), username: user, password: pass, blogId: '1' };
 
-  const blogs = await xmlrpc(cfg, 'wp.getUsersBlogs', [user, pass]);
+  let blogs;
+  try {
+    blogs = await xmlrpc(cfg, 'wp.getUsersBlogs', [user, pass]);
+  } catch (e) {
+    // コピー時に前後の空白が混ざっていることがあるため、取り除いて、もう一度試す
+    if (e.status === 403 && pass !== pass.trim()) {
+      cfg.password = pass.trim();
+      blogs = await xmlrpc(cfg, 'wp.getUsersBlogs', [user, cfg.password]);
+    } else {
+      throw e;
+    }
+  }
   if (!Array.isArray(blogs) || !blogs.length) throw new Error('ログインできましたが、投稿先のサイトが見つかりませんでした');
   cfg.blogId = String(blogs[0].blogid || '1');
 
   let profile = {};
-  try { profile = await xmlrpc(cfg, 'wp.getProfile', [cfg.blogId, user, pass]); } catch { /* 取れなくても接続は成立 */ }
+  try { profile = await xmlrpc(cfg, 'wp.getProfile', [cfg.blogId, user, cfg.password]); } catch { /* 取れなくても接続は成立 */ }
   const roles = Array.isArray(profile.roles) ? profile.roles : [];
   if (roles.includes('subscriber')) throw new Error('このユーザーは「購読者」のため、記事を投稿できません（「投稿者」以上の権限が必要です）');
   return {
