@@ -28,6 +28,7 @@ const state = {
   direction: null,
   gscConnected: false,
   gscDemo: false, // デモ連携を選んだか（実際のGoogle連携とは別）
+  gscReconnect: false, // 連携済みでも、別のアカウントで連携し直すか
   gscContext: 'analyze', // GSC連携の起点：'analyze'（分析の流れ）| 'settings'（設定画面）
   wordpressConnected: false,
   wordpressReal: false, // 実際のWordPressに接続しているか（デモ接続とは別）
@@ -266,12 +267,8 @@ function renderExistingUnderstand() {
   document.getElementById('go-analyze-gsc').addEventListener('click', async () => {
     state.siteUrlInput = (document.getElementById('site-url').value || '').trim() || 'https://example.co.jp';
     state.gscContext = 'analyze';
-    // すでに実連携済みなら、認証をやり直さずにサイト選択へ進む
-    try {
-      const st = await api('/api/gsc/status', { body: { mediaId: state.mediaId } });
-      if (st.connected) { renderGscSites(); return; }
-    } catch (e) { /* 状況が取れなければ通常の連携画面へ */ }
-    renderGscConnect();
+    state.gscReconnect = false;
+    renderGscConnect(); // 連携済みのアカウントがあれば、「連携済みアカウント」の画面になる
   });
   document.getElementById('go-analyze-nogsc').addEventListener('click', () => {
     state.siteUrlInput = (document.getElementById('site-url').value || '').trim() || 'https://example.co.jp';
@@ -282,11 +279,67 @@ function renderExistingUnderstand() {
   pushHistory();
 }
 
+// すでにGSCと連携済みのアカウントがある場合の、連携画面。
+// 連携済みアカウントを表示し、「そのアカウントで進める」ことを前提にする（別のアカウントへの切り替え・解除もできる）。
+function renderGscConnected(st) {
+  state.screen = 'gscConnect';
+  const when = st.connectedAt ? new Date(st.connectedAt).toLocaleDateString('ja-JP') : '';
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">STEP 0-2 ・ メディア理解（既存）</div>
+        <h1>Google Search Console は連携済みです</h1>
+        <p>連携済みのアカウントで、そのまま進めます。別のアカウントを使いたい場合は、連携し直してください。</p>
+      </div>
+      <div class="card">
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:14px;">
+          <span style="font-size:22px;">🔎</span>
+          <div>
+            <div style="font-weight:700;font-size:13.5px;">Google Search Console</div>
+            <div style="font-size:11.5px;color:var(--sub);">分析するサイト：${esc(state.siteUrlInput || '')}</div>
+          </div>
+        </div>
+        <div class="info-box" style="margin:10px 0;">
+          <div class="h">連携済みアカウント <span class="pill ok">連携済み</span></div>
+          ${esc(st.account || '（アカウント名を取得できていません）')}<br>
+          ${st.siteUrl ? `前回選んだサイト：${esc(st.siteUrl)}<br>` : ''}
+          ${when ? `<span style="font-size:11.5px;color:var(--sub);">連携した日：${esc(when)}</span>` : ''}
+        </div>
+        <div style="font-size:10.5px;color:var(--sub);margin-bottom:10px;">※読み取り専用の連携です。次の画面で、このアカウントが権限を持つサイトから、分析するサイトを選びます。連携から時間がたつと、Google側の都合で、連携し直しが必要になることがあります。</div>
+        <div class="btn-row">
+          <button class="btn navy" id="gsc-use-account">このアカウントで進める →</button>
+          <button class="btn outline" id="gsc-change-account">別のアカウントで連携し直す</button>
+          <button class="btn ghost" id="gsc-unlink">連携を解除する</button>
+          <button class="btn ghost" id="gsc-cancel2">← キャンセル</button>
+        </div>
+      </div>
+    </div>
+  `, { active: false, nav: false });
+  document.getElementById('gsc-use-account').addEventListener('click', () => renderGscSites());
+  document.getElementById('gsc-change-account').addEventListener('click', () => { state.gscReconnect = true; renderGscConnect(); });
+  document.getElementById('gsc-unlink').addEventListener('click', async () => {
+    await api('/api/gsc/disconnect', { body: { mediaId: state.mediaId } });
+    state.gscConnected = false;
+    state.gscReconnect = false;
+    toast('連携を解除しました');
+    renderGscConnect();
+  });
+  document.getElementById('gsc-cancel2').addEventListener('click', () => history.back());
+  pushHistory();
+}
+
 // GSC連携画面。実際にGoogle Search Consoleと連携する。
 // 連携にはGoogle Cloudで発行したOAuthクライアント（クライアントID・シークレット）が必要なため、
 // サーバーに設定されていなければ、この画面で入力してもらう。入力しなくても「デモで続ける」で体験できる。
 async function renderGscConnect() {
   state.screen = 'gscConnect';
+  // すでに連携済みのアカウントがあれば、そのアカウントで進める画面にする（「別のアカウントで連携し直す」を選んだときは、連携のフォーム）
+  if (!state.gscReconnect && state.mediaId) {
+    try {
+      const st = await api('/api/gsc/status', { body: { mediaId: state.mediaId } });
+      if (st.connected) { renderGscConnected(st); return; }
+    } catch (e) { if (e.authExpired) return; /* 状況が取れなければ、通常の連携画面へ */ }
+  }
   let info;
   try {
     info = await api('/api/gsc/info');
@@ -470,7 +523,7 @@ function renderGscError(message) {
       </div>
     </div>
   `, { active: false, nav: false });
-  document.getElementById('gsc-retry').addEventListener('click', renderGscConnect);
+  document.getElementById('gsc-retry').addEventListener('click', () => { state.gscReconnect = true; renderGscConnect(); });
   document.getElementById('gsc-skip').addEventListener('click', () => {
     state.gscConnected = false;
     if (state.gscContext === 'settings') renderSettings();
@@ -1036,7 +1089,7 @@ async function renderSettings() {
   `, { active: false });
 
   const gscConnectBtn = document.getElementById('gsc-real-connect');
-  if (gscConnectBtn) gscConnectBtn.addEventListener('click', () => { state.gscContext = 'settings'; renderGscConnect(); });
+  if (gscConnectBtn) gscConnectBtn.addEventListener('click', () => { state.gscContext = 'settings'; state.gscReconnect = !!gscStatus.connected; renderGscConnect(); });
   const gscChange = document.getElementById('gsc-change-site');
   if (gscChange) gscChange.addEventListener('click', () => { state.gscContext = 'settings'; renderGscSites(); });
   const gscOff = document.getElementById('gsc-settings-disconnect');

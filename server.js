@@ -24,7 +24,8 @@ const crypto = require('crypto');
 const app = express();
 app.set('trust proxy', true); // Render等のプロキシ配下でも、https/ホスト名を正しく取得する（GSC連携のリダイレクトURI用）
 app.use(express.json({ limit: '1mb' }));
-require('./accounts').install(app); // アカウント（ログイン）と、施策のステータス管理（ローカル版のみ）
+const accounts = require('./accounts');
+accounts.install(app); // アカウント（ログイン）と、施策のステータス管理（ローカル版のみ）
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'media-compass-saas-prototype.html'));
@@ -269,9 +270,30 @@ app.get('/api/gsc/info', (req, res) => {
   res.json({ serverConfigured: gsc.enabled(), redirectUri: gsc.redirectUriFor(req) });
 });
 
+// アカウントに保存されている「連携済みのGSC」を、このメディアで使えるようにする。
+// （一度連携すれば、サーバーを再起動しても、新しい分析を始めても、同じアカウントで引き続き使える）
+function loadGsc(req, m) {
+  if (!m) return null;
+  if (!m.gsc && req.user) {
+    const saved = accounts.getIntegration(req.user.id, 'gsc');
+    if (saved) {
+      m.gsc = { cfg: saved.cfg, tokens: saved.tokens, email: saved.email, siteUrl: saved.siteUrl || null, connectedAt: saved.connectedAt };
+      m.gscCfg = saved.cfg;
+    }
+  }
+  return m.gsc || null;
+}
+
+function saveGsc(req, m) {
+  if (req.user && m.gsc) {
+    accounts.setIntegration(req.user.id, 'gsc', { cfg: m.gsc.cfg, tokens: m.gsc.tokens, email: m.gsc.email, siteUrl: m.gsc.siteUrl, connectedAt: m.gsc.connectedAt });
+  }
+}
+
 // 設定画面などで表示する、現在の実連携の状況（シークレットやトークンは返さない）
 app.post('/api/gsc/status', (req, res) => {
   const m = ownedMedia(req, req.body?.mediaId);
+  loadGsc(req, m);
   res.json(m?.gsc ? { connected: true, account: m.gsc.email, siteUrl: m.gsc.siteUrl, connectedAt: m.gsc.connectedAt } : { connected: false });
 });
 
@@ -300,7 +322,9 @@ app.get('/api/gsc/callback', async (req, res) => {
   if (error || !code) return res.redirect('/?gsc=error&reason=' + encodeURIComponent(error === 'access_denied' ? '連携がキャンセルされました' : '認証に失敗しました'));
   try {
     if (!m.gscCfg) throw new Error('認証情報が見つかりません。もう一度、連携をやり直してください');
+    if (m.userId && m.userId !== req.user?.id) throw new Error('ログインしているアカウントが、連携を始めたアカウントと異なります。もう一度やり直してください');
     m.gsc = await gsc.exchangeCode(m.gscCfg, String(code));
+    saveGsc(req, m); // アカウントに（暗号化して）保存する
     res.redirect('/?gsc=ok');
   } catch (e) {
     console.warn('[GSC連携失敗]', e.message);
@@ -311,6 +335,7 @@ app.get('/api/gsc/callback', async (req, res) => {
 app.post('/api/gsc/sites', async (req, res) => {
   const m = getMediaProfile(req, res);
   if (!m) return;
+  loadGsc(req, m);
   if (!m.gsc) return res.status(400).json({ error: 'GSC未連携です' });
   try {
     const sites = gsc.rankSites(await gsc.listSites(m.gsc), req.body.siteUrl || m.siteUrl || '');
@@ -323,17 +348,21 @@ app.post('/api/gsc/sites', async (req, res) => {
 app.post('/api/gsc/select-site', (req, res) => {
   const m = getMediaProfile(req, res);
   if (!m) return;
+  loadGsc(req, m);
   if (!m.gsc) return res.status(400).json({ error: 'GSC未連携です' });
   m.gsc.siteUrl = String(req.body.siteUrl || '');
+  saveGsc(req, m);
   res.json({ ok: true });
 });
 
 app.post('/api/gsc/disconnect', async (req, res) => {
   const m = getMediaProfile(req, res);
   if (!m) return;
+  loadGsc(req, m);
   if (m.gsc) await gsc.revoke(m.gsc);
   m.gsc = null;
   m.gscCfg = null;
+  if (req.user) accounts.setIntegration(req.user.id, 'gsc', null);
   res.json({ ok: true });
 });
 
@@ -359,6 +388,7 @@ app.post('/api/media/understand-existing', async (req, res) => {
   // GSCを実連携済みなら、検索実績（過去28日）も取得して分析に加える。失敗してもクロールのみで続行する。
   let gscSummary = null;
   let gscError = null;
+  loadGsc(req, m);
   if (withGsc && m.gsc?.siteUrl) {
     try { gscSummary = await gsc.fetchSummary(m.gsc); } catch (e) { gscError = e.message; console.warn('[GSCデータ取得失敗]', e.message); }
   }

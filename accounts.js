@@ -38,6 +38,57 @@ function save() {
   fs.renameSync(tmp, FILE);
 }
 
+// ---- 連携情報（Google等のトークン）の暗号化保存 ----
+// AES-256-GCMで暗号化して、アカウントのデータに入れる。鍵は、環境変数 DATA_ENCRYPTION_KEY（64桁の16進数）か、
+// なければ data/secret.key（初回に自動生成。.gitignoreで除外済み）を使う。
+// ※鍵ファイルが同じパソコン内にあるため、「ファイルを見られても、そのままでは読めない」程度の保護。パソコン自体の管理は別途必要。
+function encryptionKey() {
+  if (/^[0-9a-fA-F]{64}$/.test(process.env.DATA_ENCRYPTION_KEY || '')) return Buffer.from(process.env.DATA_ENCRYPTION_KEY, 'hex');
+  const keyFile = path.join(DATA_DIR, 'secret.key');
+  try {
+    return Buffer.from(fs.readFileSync(keyFile, 'utf-8').trim(), 'hex');
+  } catch {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const key = crypto.randomBytes(32);
+    fs.writeFileSync(keyFile, key.toString('hex'), { encoding: 'utf-8', mode: 0o600 });
+    return key;
+  }
+}
+
+function encryptJson(obj) {
+  const iv = crypto.randomBytes(12);
+  const c = crypto.createCipheriv('aes-256-gcm', encryptionKey(), iv);
+  const data = Buffer.concat([c.update(JSON.stringify(obj), 'utf-8'), c.final()]);
+  return `v1:${iv.toString('hex')}:${c.getAuthTag().toString('hex')}:${data.toString('hex')}`;
+}
+
+function decryptJson(text) {
+  const [v, iv, tag, data] = String(text).split(':');
+  if (v !== 'v1') throw new Error('unknown format');
+  const d = crypto.createDecipheriv('aes-256-gcm', encryptionKey(), Buffer.from(iv, 'hex'));
+  d.setAuthTag(Buffer.from(tag, 'hex'));
+  return JSON.parse(Buffer.concat([d.update(Buffer.from(data, 'hex')), d.final()]).toString('utf-8'));
+}
+
+// アカウントごとの連携情報（name: 'gsc' など）。obj に null を渡すと削除する。
+function setIntegration(userId, name, obj) {
+  if (!ENABLED) return;
+  const user = db.users.find((u) => u.id === userId);
+  if (!user) return;
+  user.integrations = user.integrations || {};
+  if (obj) user.integrations[name] = encryptJson(obj);
+  else delete user.integrations[name];
+  save();
+}
+
+function getIntegration(userId, name) {
+  if (!ENABLED) return null;
+  const user = db.users.find((u) => u.id === userId);
+  const enc = user?.integrations?.[name];
+  if (!enc) return null;
+  try { return decryptJson(enc); } catch (e) { console.warn('[アカウント] 連携情報を復号できませんでした:', name); return null; }
+}
+
 // ---- パスワード（scrypt。平文は保存しない） ----
 function hashPassword(password) {
   const salt = crypto.randomBytes(16);
@@ -216,4 +267,4 @@ function install(app) {
   });
 }
 
-module.exports = { install, STATUSES, ENABLED };
+module.exports = { install, STATUSES, ENABLED, setIntegration, getIntegration };
