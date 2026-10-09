@@ -220,7 +220,10 @@ async function xmlrpc(cfg, method, params, { timeoutMs = 60000 } = {}) {
     if (res.status === 403 || res.status === 404 || res.status === 405) {
       throw new Error('このサイトでは、XML-RPCが無効、または制限されています（サイトの管理者に確認してください）');
     }
-    throw new Error(`WordPressから想定外の応答がありました（HTTP ${res.status}）`);
+    // 原因を調べやすいよう、応答の先頭部分を添える（タグは除き、パスワードが含まれていた場合は伏せる）
+    let head = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 240);
+    if (cfg.password) head = head.split(cfg.password).join('***');
+    throw new Error(`WordPressから想定外の応答がありました（HTTP ${res.status}、形式：${res.headers.get('content-type') || '不明'}、${text.length}文字）。応答の先頭：${head || '（空）'}`);
   }
   const $ = cheerio.load(text.slice(at), { xmlMode: true });
   const fault = $('methodResponse > fault > value');
