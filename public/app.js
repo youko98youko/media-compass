@@ -59,8 +59,36 @@ window.fetch = async (input, init) => {
     e.handled = true;
     throw e;
   }
+  if (res.status === 404 && url.startsWith('/api/')) {
+    // サーバーが再起動されると、作業中の内容（メディアの分析・記事作成）は消える。画面に残っていても、案内して最初に戻す
+    const data = await res.clone().json().catch(() => ({}));
+    if (data.error === 'media profile not found' || data.error === 'session not found') {
+      renderWorkLost();
+      const e = new Error('作業内容が見つかりません');
+      e.authExpired = true; // 画面は切り替え済み。呼び出し元では、追加のエラー表示をしない
+      e.handled = true;
+      throw e;
+    }
+  }
   return res;
 };
+
+function renderWorkLost() {
+  state.screen = 'workLost';
+  shell(`
+    <div class="wrap" style="max-width:640px;">
+      <div class="screen-head">
+        <div class="eyebrow">お知らせ</div>
+        <h1>作業内容が見つかりませんでした</h1>
+      </div>
+      <div class="card">
+        <div class="missing-box"><div class="h">サーバーが再起動されたため、作業中の内容が消えました</div>メディアの分析や、作成中の記事は、サーバーの再起動で消えます（ログインは、そのままです）。お手数ですが、最初の画面からやり直してください。<br>GSCやWordPressの連携は、保存されているので、もう一度、入力する必要はありません。</div>
+        <div class="btn-row"><button class="btn navy" id="work-lost-restart">最初の画面に戻る</button></div>
+      </div>
+    </div>
+  `, { active: false, nav: false });
+  document.getElementById('work-lost-restart').addEventListener('click', () => location.reload());
+}
 
 async function api(path, opts) {
   let res;
@@ -71,6 +99,7 @@ async function api(path, opts) {
       body: opts && opts.body ? JSON.stringify(opts.body) : undefined,
     });
   } catch (networkErr) {
+    if (networkErr && networkErr.authExpired) throw networkErr; // ログイン切れ・作業内容の消失は、共通処理で画面を切り替え済み
     throw new Error('NO_SERVER');
   }
   if (res.status === 401) {
@@ -1578,7 +1607,19 @@ function renderArticleEdit() {
     await api('/api/article/save', { body: { sessionId: state.sessionId, article: state.article } });
     toast('編集内容を保存しました');
   });
-  document.getElementById('go-publish').addEventListener('click', () => {
+  document.getElementById('go-publish').addEventListener('click', async () => {
+    // アカウントに保存済みの接続があれば、接続画面を飛ばして、そのまま下書きを保存する（一度接続すれば、次回から省略）
+    if (!state.wordpressConnected) {
+      try {
+        const st = await api('/api/wordpress/status', { body: { mediaId: state.mediaId } });
+        if (st.connected) {
+          state.wordpressConnected = true;
+          state.wordpressReal = true;
+          state.wordpressSiteUrl = st.siteUrl;
+          state.wordpressMethod = st.method;
+        }
+      } catch (e) { if (e.authExpired) return; }
+    }
     if (state.wordpressConnected) {
       doPublish();
     } else {
@@ -2197,6 +2238,7 @@ const SCREEN_RENDERERS = {
   published: renderPublishedStatus,
   publishError: () => renderPublishError(state.publishErrorMessage || ''),
   export: renderExport,
+  workLost: renderWorkLost,
   mediaPage: () => renderMediaPage(state.publishInfo && state.publishInfo.articleId),
   monitoring: renderMonitoring,
   fixDetail: renderFixDetail,

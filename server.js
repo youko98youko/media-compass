@@ -444,6 +444,23 @@ app.post('/api/media/wordpress-connect', (req, res) => {
   res.json({ ok: true, siteUrl: m.wordpress.siteUrl });
 });
 
+// アカウントに保存されている「接続済みのWordPress」を、このメディアで使えるようにする（GSCと同じ仕組み）。
+function loadWp(req, m) {
+  if (!m) return null;
+  if (!m.wordpress?.real && req.user) {
+    const saved = accounts.getIntegration(req.user.id, 'wordpress');
+    if (saved) m.wordpress = { connected: true, real: true, ...saved };
+  }
+  return m.wordpress || null;
+}
+
+function saveWp(req, m) {
+  const w = m.wordpress;
+  if (req.user && w?.real) {
+    accounts.setIntegration(req.user.id, 'wordpress', { method: w.method, siteUrl: w.siteUrl, siteName: w.siteName, userName: w.userName, canUpload: w.canUpload, isAdmin: w.isAdmin, cfg: w.cfg });
+  }
+}
+
 // WordPressの実接続（REST API＋アプリケーションパスワード）。投稿は常に「下書き」。
 // 入力されたパスワードはこのメディアのメモリ上にのみ保持し、画面には返さない。
 app.post('/api/wordpress/connect', async (req, res) => {
@@ -455,6 +472,7 @@ app.post('/api/wordpress/connect', async (req, res) => {
     const r = method === 'xmlrpc' ? await wordpress.connectXmlRpc(siteUrl, username, appPassword) : await wordpress.connect(siteUrl, username, appPassword);
     const kind = method === 'xmlrpc' ? 'xmlrpc' : 'rest';
     m.wordpress = { connected: true, real: true, method: kind, siteUrl: r.cfg.siteUrl, siteName: r.siteName, userName: r.userName, canUpload: r.canUpload, isAdmin: !!r.isAdmin, cfg: r.cfg };
+    saveWp(req, m); // アカウントに（暗号化して）保存する
     res.json({ ok: true, method: kind, siteUrl: r.cfg.siteUrl, siteName: r.siteName, userName: r.userName, canUpload: r.canUpload, isAdmin: !!r.isAdmin });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -462,7 +480,7 @@ app.post('/api/wordpress/connect', async (req, res) => {
 });
 
 app.post('/api/wordpress/status', (req, res) => {
-  const w = ownedMedia(req, req.body?.mediaId)?.wordpress;
+  const w = loadWp(req, ownedMedia(req, req.body?.mediaId));
   res.json(w?.real ? { connected: true, method: w.method || 'rest', siteUrl: w.siteUrl, siteName: w.siteName, userName: w.userName, canUpload: w.canUpload, isAdmin: !!w.isAdmin } : { connected: false });
 });
 
@@ -470,6 +488,7 @@ app.post('/api/wordpress/disconnect', (req, res) => {
   const m = getMediaProfile(req, res);
   if (!m) return;
   m.wordpress = null;
+  if (req.user) accounts.setIntegration(req.user.id, 'wordpress', null);
   res.json({ ok: true });
 });
 
@@ -966,7 +985,7 @@ app.post('/api/publish', async (req, res) => {
   if (!s.article) return res.status(400).json({ error: 'article not generated yet' });
 
   // WordPressに実接続している場合は、公開ではなく「下書き投稿」を行う
-  const wp = s.mediaId ? mediaProfiles.get(s.mediaId)?.wordpress : null;
+  const wp = s.mediaId ? loadWp(req, mediaProfiles.get(s.mediaId)) : null;
   if (req.body?.expectWordpress && !wp?.real) return res.status(409).json({ error: 'wordpress_not_connected' });
   if (wp?.real) {
     try {
