@@ -228,7 +228,7 @@ async function xmlrpc(cfg, method, params, { timeoutMs = 60000 } = {}) {
     const f = parseValue($, fault.get(0));
     const code = Number(f.faultCode);
     let msg = String(f.faultString || '');
-    if (code === 403) msg = 'ユーザー名またはパスワードが正しくありません';
+    if (code === 403) msg = 'ユーザー名またはパスワードが正しくありません。まず、WordPressのログイン画面（サイトURL/wp-login.php）で、同じユーザー名・パスワードでログインできるか確認してください。ユーザー名は、メールアドレスや表示名ではなく、ログイン用の「ユーザー名」です。コピーしたときに、前後に空白が入っていないか、l（エル）とI（アイ）、0（ゼロ）とO（オー）の取り違えがないかも、確認してください';
     else if (code === 401) msg = 'このユーザーには、この操作を行う権限がありません（投稿者以上の権限が必要です。画像のアップロードには、「寄稿者」ではなく「投稿者」以上が必要です）';
     const err = new Error(msg || 'WordPressでエラーが発生しました');
     err.status = code;
