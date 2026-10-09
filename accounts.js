@@ -103,8 +103,13 @@ function verifyPassword(password, stored) {
   return crypto.timingSafeEqual(actual, expected);
 }
 
-// ---- ログイン状態（サーバーのメモリ上。再起動すると、ログインし直しになる） ----
-const sessions = new Map(); // token -> { userId, exp }
+// ---- ログイン状態（data/accounts.json に保存。サーバーを再起動しても、ログインしたままになる） ----
+// Cookieに入れる値（トークン）そのものは保存せず、そのハッシュだけを保存する。
+const hashToken = (t) => crypto.createHash('sha256').update(t).digest('hex');
+function sessionTable() {
+  db.sessions = db.sessions || {};
+  return db.sessions;
+}
 const failures = new Map(); // ユーザー名 -> { count, until }（総当たり対策）
 
 function parseCookies(req) {
@@ -118,9 +123,10 @@ function parseCookies(req) {
 
 function currentUser(req) {
   const token = parseCookies(req)[COOKIE];
-  const s = token && sessions.get(token);
+  const key = token ? hashToken(token) : null;
+  const s = key ? sessionTable()[key] : null;
   if (!s || s.exp < Date.now()) {
-    if (token) sessions.delete(token);
+    if (s) { delete sessionTable()[key]; save(); }
     return null;
   }
   return db.users.find((u) => u.id === s.userId) || null;
@@ -128,7 +134,10 @@ function currentUser(req) {
 
 function startSession(res, user) {
   const token = crypto.randomBytes(32).toString('hex');
-  sessions.set(token, { userId: user.id, exp: Date.now() + SESSION_DAYS * 86400000 });
+  const table = sessionTable();
+  for (const [k, v] of Object.entries(table)) if (v.exp < Date.now()) delete table[k]; // 期限切れを片付ける
+  table[hashToken(token)] = { userId: user.id, exp: Date.now() + SESSION_DAYS * 86400000 };
+  save();
   res.setHeader('Set-Cookie', `${COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_DAYS * 86400}`);
 }
 
@@ -207,7 +216,7 @@ function install(app) {
 
   app.post('/api/auth/logout', (req, res) => {
     const token = parseCookies(req)[COOKIE];
-    if (token) sessions.delete(token);
+    if (token && sessionTable()[hashToken(token)]) { delete sessionTable()[hashToken(token)]; save(); }
     res.setHeader('Set-Cookie', `${COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
     res.json({ ok: true });
   });

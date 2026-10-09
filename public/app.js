@@ -45,6 +45,23 @@ function stepIndexFor(screen) {
   return { dashboard: -1, themeDetail: 0, primaryInfo: 1, hearing: 2, outline: 3, generating: 3, articleEdit: 4, published: 5 }[screen] ?? -1;
 }
 
+// ログインの有効期限切れ（未ログイン）を、どの画面の通信でも、共通で扱う：
+// サーバーが 401 を返したら、ログイン画面へ戻して案内を出す（各画面で、メッセージが生のまま出ないようにする）。
+const nativeFetch = window.fetch.bind(window);
+window.fetch = async (input, init) => {
+  const res = await nativeFetch(input, init);
+  const url = typeof input === 'string' ? input : (input && input.url) || '';
+  if (res.status === 401 && url.startsWith('/api/') && !url.startsWith('/api/auth/')) {
+    state.user = null;
+    renderAuth('ログインの有効期限が切れました。もう一度ログインしてください');
+    const e = new Error('ログインが必要です');
+    e.authExpired = true;
+    e.handled = true;
+    throw e;
+  }
+  return res;
+};
+
 async function api(path, opts) {
   let res;
   try {
