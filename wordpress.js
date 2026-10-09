@@ -12,7 +12,9 @@ function normalizeSite(input) {
   const u = new URL(s);
   // 認証情報を平文で送らないよう、httpのURLはhttpsに切り替える（自動テスト用のローカルの擬似サーバーを除く）
   if (u.protocol === 'http:' && process.env.ALLOW_LOCAL_TARGETS !== '1') u.protocol = 'https:';
-  return `${u.origin}${u.pathname.replace(/\/+$/, '')}`; // 末尾の/を除く（サブディレクトリ運用のWordPressにも対応）
+  // ログイン画面・管理画面・APIのURLを貼り付けても、サイトのトップ（WordPressのインストール場所）に直す
+  const base = u.pathname.replace(/\/(wp-login\.php|wp-admin(\/.*)?|xmlrpc\.php|wp-json(\/.*)?|wp-content(\/.*)?|index\.php)$/i, '');
+  return `${u.origin}${base.replace(/\/+$/, '')}`; // 末尾の/を除く（サブディレクトリ運用のWordPressにも対応）
 }
 
 function authHeader(cfg) {
