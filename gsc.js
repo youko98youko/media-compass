@@ -184,6 +184,70 @@ async function fetchSummary(gsc) {
   };
 }
 
+// ---------------------------------------------------------------
+// ページ（記事）ごとの検索実績：リライト候補の抽出と、リライト後の効果測定に使う
+// ---------------------------------------------------------------
+// 直近28日（GSCは2〜3日遅れるため、終了日は3日前）と、その前の28日
+function periods() {
+  const end = new Date(Date.now() - 3 * 86400000);
+  const start = new Date(end.getTime() - 27 * 86400000);
+  const pEnd = new Date(start.getTime() - 86400000);
+  const pStart = new Date(pEnd.getTime() - 27 * 86400000);
+  return { cur: { startDate: ymd(start), endDate: ymd(end) }, prev: { startDate: ymd(pStart), endDate: ymd(pEnd) } };
+}
+
+const metricsOf = (r) => ({ clicks: r.clicks, impressions: r.impressions, ctr: Math.round(r.ctr * 1000) / 10, position: Math.round(r.position * 10) / 10 });
+
+// URLの表記ゆれ（大文字小文字・末尾の/・クエリ・ハッシュ）をそろえる。WordPressの記事URLと、GSCのURLを、突き合わせるために使う。
+function normUrl(u) {
+  try {
+    const x = new URL(String(u));
+    const path = x.pathname.replace(/\/+$/, '') || '/';
+    return `${x.hostname.toLowerCase().replace(/^www\./, '')}${path}`;
+  } catch { return String(u || '').toLowerCase(); }
+}
+
+// 指定期間の、ページ別の実績。戻り値：Map（正規化したURL → 実績）
+async function fetchPages(gsc, period) {
+  const map = new Map();
+  for (let startRow = 0; startRow < 15000; startRow += 5000) {
+    const data = await gscFetch(gsc, `/sites/${encodeURIComponent(gsc.siteUrl)}/searchAnalytics/query`, { ...period, dimensions: ['page'], rowLimit: 5000, startRow });
+    const rows = data.rows || [];
+    for (const r of rows) map.set(normUrl(r.keys[0]), { page: r.keys[0], ...metricsOf(r) });
+    if (rows.length < 5000) break;
+  }
+  return map;
+}
+
+async function fetchPagePerformance(gsc) {
+  if (!gsc.siteUrl) throw new Error('GSCのサイトが選択されていません');
+  const p = periods();
+  const [cur, prev] = await Promise.all([fetchPages(gsc, p.cur), fetchPages(gsc, p.prev)]);
+  return { periods: p, cur, prev };
+}
+
+// 1ページの合計の実績（効果測定用）。期間を省略すると、直近28日
+async function fetchPageTotal(gsc, pageUrl, period = periods().cur) {
+  const data = await gscFetch(gsc, `/sites/${encodeURIComponent(gsc.siteUrl)}/searchAnalytics/query`, {
+    ...period,
+    dimensionFilterGroups: [{ filters: [{ dimension: 'page', operator: 'equals', expression: pageUrl }] }],
+  });
+  const r = (data.rows || [])[0];
+  return { period, ...(r ? metricsOf(r) : { clicks: 0, impressions: 0, ctr: 0, position: null }) };
+}
+
+// 1ページの、検索クエリ別の実績（リライトの材料）
+async function fetchPageQueries(gsc, pageUrl, limit = 15) {
+  const p = periods();
+  const data = await gscFetch(gsc, `/sites/${encodeURIComponent(gsc.siteUrl)}/searchAnalytics/query`, {
+    ...p.cur,
+    dimensions: ['query'],
+    rowLimit: limit,
+    dimensionFilterGroups: [{ filters: [{ dimension: 'page', operator: 'equals', expression: pageUrl }] }],
+  });
+  return (data.rows || []).map((r) => ({ query: r.keys[0], ...metricsOf(r) }));
+}
+
 async function revoke(gsc) {
   try {
     await fetch(REVOKE_URL, {
@@ -195,4 +259,4 @@ async function revoke(gsc) {
   } catch { /* 失敗してもサーバー側のトークンは破棄する */ }
 }
 
-module.exports = { enabled, redirectUriFor, envConfig, configFromInput, buildAuthUrl, consumeState, exchangeCode, listSites, rankSites, fetchSummary, revoke };
+module.exports = { enabled, redirectUriFor, envConfig, configFromInput, buildAuthUrl, consumeState, exchangeCode, listSites, rankSites, fetchSummary, revoke, periods, normUrl, fetchPagePerformance, fetchPageTotal, fetchPageQueries };

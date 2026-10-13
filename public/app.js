@@ -41,6 +41,8 @@ const state = {
   registeredMedia: null, // 選んだ（登録した）メディア { id, name, siteUrl }
   mediaLinks: [], // 登録済みのリンク（記事のボタンのリンク先） { id, label, url }
   mediaDefaultLinkId: null,
+  rewriteMeasureId: null, // リライト案の編集中の施策ID
+  rewriteArticle: null, // 元の記事 { wpId, title, url }
 };
 
 const STEPS = ['テーマ選定', '一次情報', 'AIヒアリング', '記事構成・生成', '装飾・確認', '公開'];
@@ -213,7 +215,7 @@ function shell(innerHtml, { active = true, nav = true } = {}) {
         <span class="${state.screen === 'dashboard' ? 'on' : ''}" data-nav="dashboard">ホーム</span>
         <span class="${state.screen === 'direction' ? 'on' : ''}" data-nav="direction">メディアの方向性</span>
         ${state.accountsEnabled ? `<span class="${['measures', 'auth'].includes(state.screen) ? 'on' : ''}" data-nav="measures">施策管理</span>` : ''}
-        <span data-nav="monitoring">記事一覧・監視</span>
+        <span class="${['articles', 'articlesPick', 'rewriteResult'].includes(state.screen) ? 'on' : ''}" data-nav="monitoring">記事一覧・監視</span>
         <span class="${state.screen === 'settings' ? 'on' : ''}" data-nav="settings">設定</span>
       </div>` : state.accountsEnabled ? `
       <div class="nav">
@@ -237,7 +239,7 @@ function shell(innerHtml, { active = true, nav = true } = {}) {
   app.querySelectorAll('[data-nav]').forEach((elm) => {
     elm.addEventListener('click', () => {
       if (elm.dataset.nav === 'dashboard') renderDashboard();
-      if (elm.dataset.nav === 'monitoring') renderMonitoring();
+      if (elm.dataset.nav === 'monitoring') (state.accountsEnabled && state.user ? renderArticles() : renderMonitoring()); // ローカル版は、投稿済み記事の一覧とリライト
       if (elm.dataset.nav === 'direction') renderDirectionSummary();
       if (elm.dataset.nav === 'settings') renderSettings();
       if (elm.dataset.nav === 'measures') (state.user ? renderMeasures() : renderAuth());
@@ -895,7 +897,8 @@ function renderWordpressConnect() {
   app.querySelectorAll('input[name="wp-method"]').forEach((r) => r.addEventListener('change', applyMethod));
 
   const afterConnect = () => {
-    if (isPublish) doPublish();
+    if (state.wpConnectContext === 'articles') renderArticles();
+    else if (isPublish) doPublish();
     else renderSettings();
   };
   document.getElementById('wp-authorize').addEventListener('click', async () => {
@@ -1458,6 +1461,8 @@ async function selectTheme(themeId) {
     return;
   }
   state.sessionId = sessionId;
+  state.rewriteMeasureId = null; // 新しい記事の作成（リライト案の編集ではない）
+  state.rewriteArticle = null;
   state.theme = theme;
   state.availablePrimaryInfo = availablePrimaryInfo;
   state.hearing = { history: [], question: null, questionNumber: 0, maxQuestions: 3, done: false, loading: false };
@@ -1971,14 +1976,16 @@ function renderArticleEdit() {
   const a = state.article;
   const blocksHtml = a.blocks.map((b, i) => blockToEditableHtml(b, i)).join('');
 
+  const rw = state.rewriteMeasureId ? state.rewriteArticle : null; // リライト案の編集中は、元の記事の情報が入る
   shell(`
     <div class="wrap wide">
       <div class="screen-head">
-        <div class="eyebrow">STEP 6-8 ・ 記事生成・装飾・確認</div>
+        <div class="eyebrow">${rw ? 'リライト案の編集' : 'STEP 6-8 ・ 記事生成・装飾・確認'}</div>
         <h1>${esc(a.title)}</h1>
         <p>本文・画像・装飾を確認し、必要に応じて編集してください（見出し・本文はクリックして直接編集できます）。</p>
       </div>
       <div class="card">
+        ${rw ? `<div class="info-box" style="margin-bottom:12px;"><div class="h">リライト案です（元の記事：<a href="${esc(rw.url)}" target="_blank" rel="noopener">${esc(rw.title)}</a>）</div>「WordPressに新しい下書きとして保存」を押すと、「【リライト案】」を付けた<b>新しい下書き</b>を作ります。公開中の元の記事には、手を加えません。「【要確認】」の箇所は、人が確認してから、使ってください。</div>` : ''}
         <div style="font-size:11.5px;color:var(--sub);margin-bottom:10px;">使用した一次情報・ヒアリング回答は本文中に反映されています。<span class="proto-tag">生成モード: ${state.lastMode || (state.aiEnabled ? 'ai' : 'simulated')}</span></div>
         ${state.aiEnabled ? `<div class="info-box" style="margin-bottom:12px;">
           <div class="h">挿入画像は、AI（OpenAI）が自動で生成します</div>
@@ -1989,11 +1996,11 @@ function renderArticleEdit() {
         <div class="btn-row">
           <button class="btn ghost" id="save-draft">編集内容を保存</button>
           <button class="btn outline" id="go-export">WordPress用のHTMLを書き出す</button>
-          <button class="btn gold" id="go-publish">${state.wordpressConnected && state.wordpressReal ? 'WordPressに下書き保存 →' : '公開する →'}</button>
+          <button class="btn gold" id="go-publish">${state.wordpressConnected && state.wordpressReal ? (rw ? 'WordPressに新しい下書きとして保存 →' : 'WordPressに下書き保存 →') : '公開する →'}</button>
         </div>
       </div>
     </div>
-  `);
+  `, rw ? { active: false } : undefined);
 
   bindEditables(app);
   state.article.blocks.forEach((b, i) => { if (b.type === 'cta') bindCtaControls(i); });
@@ -2184,8 +2191,8 @@ function renderPublishedStatus() {
       <div class="wrap">
         <div class="screen-head">
           <div class="eyebrow">STEP 10 ・ WordPressへの下書き投稿</div>
-          <h1>WordPressに下書きとして保存しました</h1>
-          <p>この記事はまだ公開されていません。WordPressの管理画面で内容を確認し、問題がなければ公開してください。</p>
+          <h1>${info.isRewrite ? 'リライト案を、WordPressに新しい下書きとして保存しました' : 'WordPressに下書きとして保存しました'}</h1>
+          <p>${info.isRewrite ? '元の記事は、そのままです。下書きの内容を確認してください。' : 'この記事はまだ公開されていません。WordPressの管理画面で内容を確認し、問題がなければ公開してください。'}</p>
         </div>
         <div class="card">
           <div class="field-grid">
@@ -2197,13 +2204,19 @@ function renderPublishedStatus() {
           <div class="btn-row">
             <a class="btn navy" href="${esc(info.editUrl)}" target="_blank" rel="noopener">WordPressで下書きを開く →</a>
             <a class="btn outline" href="${esc(info.previewUrl)}" target="_blank" rel="noopener">プレビューを見る</a>
-            <button class="btn ghost" id="back-dash2">ダッシュボードに戻る</button>
+            ${info.isRewrite ? '<button class="btn navy" id="go-measures2">施策管理で確認する</button><button class="btn ghost" id="back-articles2">記事一覧へ</button>' : '<button class="btn ghost" id="back-dash2">ダッシュボードに戻る</button>'}
           </div>
+          ${info.isRewrite ? '<div class="info-box" style="margin-top:12px;"><div class="h">元の記事と差し替えるときは</div>記事のURLを変えないために、<b>下書きの内容を、元の記事の編集画面にコピーして、更新する</b>方法がおすすめです（URLが変わると、検索順位が引き継がれないことがあります）。コピー用の内容は、編集画面の「WordPress用のHTMLを書き出す」から取れます。差し替えて公開したら、施策管理で、ステータスを「完了」にしてください（効果測定の基準日になります）。</div>' : ''}
           <div style="font-size:11px;color:var(--sub);margin-top:8px;">※このアプリからは、記事を公開しません。編集後にもう一度「WordPressに下書き保存」を押すと、同じ下書きを更新します（WordPress側ですでに公開した場合は、公開済みの記事には手を加えず、別の下書きとして保存します）。</div>
         </div>
       </div>
     `);
-    document.getElementById('back-dash2').addEventListener('click', renderDashboard);
+    const bd = document.getElementById('back-dash2');
+    if (bd) bd.addEventListener('click', renderDashboard);
+    const gm = document.getElementById('go-measures2');
+    if (gm) gm.addEventListener('click', renderMeasures);
+    const ba = document.getElementById('back-articles2');
+    if (ba) ba.addEventListener('click', renderArticles);
     pushHistory();
     return;
   }
@@ -2412,6 +2425,352 @@ let editingId = null; // 編集中の施策
 let deletingId = null; // 削除の確認待ちの施策
 let measureDraft = { title: '', memo: '', status: '未着手' }; // 登録フォームの入力途中の内容
 
+// ---------------------------------------------------------------
+// 記事一覧・リライト（ローカル版）
+// 登録済みメディアのWordPressから、投稿済み記事を取り込み、GSCの実績と合わせて「リライト候補」を出す。
+// 候補から「リライト施策」を作り、AIがリライト案を作る。保存先は、WordPressの「新しい下書き」。
+// ---------------------------------------------------------------
+let articlesData = null; // GET /api/articles の結果
+let articlesFilter = 'candidates'; // 'candidates' | 'all'
+let articlesPage = 1;
+const ARTICLES_PER_PAGE = 30;
+
+async function postJson(path, body) {
+  const res = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+  const data = await res.json().catch(() => ({}));
+  return { ok: res.ok, status: res.status, data };
+}
+
+const fmtD = (iso) => (iso ? new Date(iso).toLocaleDateString('ja-JP') : '-');
+const PRIORITY_PILL = { 高: 'danger', 中: 'gold', 低: 'grey' };
+
+// 現在の登録済みメディアの、作業環境（WordPress・GSCの接続を持つ）を確保して、画面の状態に反映する
+async function ensureWorkspace(reg) {
+  const e = await api('/api/media/ensure', { body: { registeredId: reg.id } });
+  state.mediaId = e.mediaId;
+  state.mediaState = 'existing';
+  state.registeredMedia = e.registered;
+  return e;
+}
+
+// メディアを選ぶ（記事一覧に入るとき、メディアが決まっていない場合）
+async function renderArticlesPickMedia() {
+  state.screen = 'articlesPick';
+  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>読み込み中…</div></div>`, { active: false });
+  let media;
+  try {
+    ({ media } = await api('/api/registered-media'));
+  } catch (e) { if (!e.authExpired) showFatalError(e); return; }
+  const items = media.map((m) => `
+    <div class="card clickable" data-reg="${esc(m.id)}">
+      <h3>${esc(m.name)}</h3>
+      <div style="font-size:12.5px;color:var(--sub);word-break:break-all;">${esc(m.siteUrl)}</div>
+    </div>`).join('');
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">記事一覧・リライト</div>
+        <h1>どのメディアの記事を見ますか？</h1>
+        <p>登録済みのメディアから選んでください。</p>
+      </div>
+      ${items || '<div class="card" style="color:var(--sub);font-size:13px;">登録済みのメディアがありません。「既存メディアを分析する」から、メディアを登録してください。</div>'}
+    </div>
+  `, { active: false });
+  app.querySelectorAll('[data-reg]').forEach((c) => c.addEventListener('click', async () => {
+    const reg = media.find((m) => m.id === c.dataset.reg);
+    state.registeredMedia = reg;
+    renderArticles();
+  }));
+  pushHistory();
+}
+
+async function renderArticles() {
+  state.screen = 'articles';
+  if (!state.registeredMedia) { renderArticlesPickMedia(); return; }
+  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>記事一覧を読み込んでいます…</div></div>`, { active: false });
+  try {
+    await ensureWorkspace(state.registeredMedia);
+    articlesData = await api(`/api/articles?mediaId=${encodeURIComponent(state.mediaId)}`);
+  } catch (e) {
+    if (e.authExpired) return;
+    state.registeredMedia = null; // 登録が削除された等
+    renderArticlesPickMedia();
+    return;
+  }
+  articlesPage = 1;
+  drawArticles();
+  pushHistory();
+}
+
+function metricLine(cur, prev) {
+  if (!cur) return '<span style="color:var(--sub);">検索実績：なし（直近28日）</span>';
+  const diff = (a, b, goodWhenUp = true, unit = '') => {
+    if (!prev || prev[b] == null || cur[a] == null) return '';
+    const d = Math.round((cur[a] - prev[b]) * 10) / 10;
+    if (d === 0) return '';
+    const good = goodWhenUp ? d > 0 : d < 0;
+    return ` <span style="color:${good ? 'var(--ok)' : 'var(--danger)'};">(${d > 0 ? '+' : ''}${d}${unit})</span>`;
+  };
+  return `表示 ${cur.impressions.toLocaleString()}回${diff('impressions', 'impressions')}　クリック ${cur.clicks.toLocaleString()}回${diff('clicks', 'clicks')}　クリック率 ${cur.ctr}%${diff('ctr', 'ctr', true, '%')}　平均順位 ${cur.position}位${diff('position', 'position', false)}`;
+}
+
+function drawArticles() {
+  const d = articlesData;
+  const all = d.articles;
+  const cands = all.filter((a) => a.candidate && a.candidate.priority);
+  const list = articlesFilter === 'candidates' ? cands : all;
+  const pages = Math.max(1, Math.ceil(list.length / ARTICLES_PER_PAGE));
+  if (articlesPage > pages) articlesPage = pages;
+  const slice = list.slice((articlesPage - 1) * ARTICLES_PER_PAGE, articlesPage * ARTICLES_PER_PAGE);
+  const per = d.periods ? `${d.periods.cur.startDate}〜${d.periods.cur.endDate}（比較：その前の28日）` : null;
+
+  const rows = slice.map((a) => {
+    const rw = d.rewrites[a.id];
+    const c = a.candidate || {};
+    return `<div class="card" data-article="${a.id}">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        ${c.priority ? `<span class="pill ${PRIORITY_PILL[c.priority]}">リライト候補：${esc(c.priority)}</span>` : '<span class="pill grey">候補なし</span>'}
+        ${rw ? `<span class="pill ${rw.status === '完了' ? 'ok' : 'blue'}">リライト施策：${esc(rw.status)}</span>` : ''}
+        <span style="font-size:11px;color:var(--sub);">公開 ${esc(fmtD(a.date))}／更新 ${esc(fmtD(a.modified))}</span>
+      </div>
+      <h3 style="margin:6px 0;"><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.title)}</a></h3>
+      <div style="font-size:12.5px;color:var(--sub);">${metricLine(a.cur, a.prev)}</div>
+      ${c.reasons && c.reasons.length ? `<ul class="reason-list" style="margin-top:6px;">${c.reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}
+      <div class="btn-row">
+        ${rw ? '<button class="btn outline small" data-act="view">施策を見る</button>' : ''}
+        <button class="btn navy small" data-act="rewrite">${rw ? 'もう一度リライト案を作る' : 'この記事をリライトする →'}</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">記事一覧・リライト</div>
+        <h1>${esc(d.media.name)} の記事</h1>
+        <p>投稿済みの記事を、検索実績と照らし合わせて、リライトの候補を出します。</p>
+      </div>
+      <div class="card">
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+          <button class="btn navy small" id="art-sync">${d.syncedAt ? '最新の状態に更新する' : '記事を取り込む（WordPress＋GSC）'}</button>
+          <button class="btn ghost small" id="art-switch">メディアを切り替える</button>
+          <button class="btn ghost small" id="art-measures">施策管理へ</button>
+          <span style="font-size:11.5px;color:var(--sub);">${d.syncedAt ? `最終取り込み：${esc(new Date(d.syncedAt).toLocaleString('ja-JP'))}　${all.length}本` : 'まだ記事を取り込んでいません。'}${per ? `<br>検索実績の期間：${esc(per)}` : ''}</span>
+        </div>
+        ${d.note ? `<div class="missing-box" style="margin-top:10px;">${esc(d.note)}</div>` : ''}
+        <div id="art-error" style="color:var(--danger);font-size:12.5px;margin-top:8px;"></div>
+      </div>
+      ${all.length ? `
+      <div class="chips">
+        <button class="chip ${articlesFilter === 'candidates' ? 'on' : ''}" data-filter="candidates">リライト候補（${cands.length}）</button>
+        <button class="chip ${articlesFilter === 'all' ? 'on' : ''}" data-filter="all">すべての記事（${all.length}）</button>
+      </div>
+      ${rows || '<div class="card" style="color:var(--sub);font-size:13px;">この条件に当てはまる記事はありません。</div>'}
+      ${pages > 1 ? `<div class="btn-row"><button class="btn ghost small" id="art-prev" ${articlesPage <= 1 ? 'disabled' : ''}>← 前へ</button><span style="align-self:center;font-size:12px;color:var(--sub);">${articlesPage} / ${pages}ページ</span><button class="btn ghost small" id="art-next" ${articlesPage >= pages ? 'disabled' : ''}>次へ →</button></div>` : ''}` : ''}
+    </div>
+  `, { active: false });
+
+  document.getElementById('art-sync').addEventListener('click', syncArticles);
+  document.getElementById('art-switch').addEventListener('click', () => { state.registeredMedia = null; renderArticlesPickMedia(); });
+  document.getElementById('art-measures').addEventListener('click', renderMeasures);
+  app.querySelectorAll('[data-filter]').forEach((b) => b.addEventListener('click', () => { articlesFilter = b.dataset.filter; articlesPage = 1; drawArticles(); }));
+  const prev = document.getElementById('art-prev');
+  const next = document.getElementById('art-next');
+  if (prev) prev.addEventListener('click', () => { articlesPage -= 1; drawArticles(); window.scrollTo(0, 0); });
+  if (next) next.addEventListener('click', () => { articlesPage += 1; drawArticles(); window.scrollTo(0, 0); });
+  app.querySelectorAll('[data-article]').forEach((card) => {
+    const id = Number(card.dataset.article);
+    const art = all.find((a) => a.id === id);
+    card.querySelectorAll('[data-act]').forEach((b) => b.addEventListener('click', () => {
+      if (b.dataset.act === 'rewrite') startRewrite(art);
+      else if (b.dataset.act === 'view') showMeasureById(d.rewrites[id].measureId);
+    }));
+  });
+}
+
+async function syncArticles() {
+  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>WordPressから記事を取り込み、GSCの実績と照らし合わせています…<br><span style="font-size:11.5px;color:var(--sub);">記事の数によって、数十秒かかることがあります</span></div></div>`, { active: false });
+  let r;
+  try { r = await postJson('/api/articles/sync', { mediaId: state.mediaId }); } catch (e) { if (!e.authExpired) showFatalError(e); return; }
+  if (!r.ok) {
+    await renderArticles();
+    const errEl = document.getElementById('art-error');
+    if (r.data.error === 'wordpress_not_connected') {
+      errEl.innerHTML = 'このメディアは、まだWordPressに接続されていません。記事を取り込むには、接続が必要です。 <a href="#" id="art-connect-wp">WordPressと接続する →</a>';
+      document.getElementById('art-connect-wp').addEventListener('click', (e) => { e.preventDefault(); state.wpConnectContext = 'articles'; renderWordpressConnect(); });
+    } else {
+      errEl.textContent = r.data.error || '取り込めませんでした';
+    }
+    return;
+  }
+  await renderArticles();
+  toast(`${r.data.count}本の記事を取り込みました（リライト候補：${r.data.candidates}本）`);
+}
+
+// ---- リライト案の作成 ----
+async function startRewrite(article, { force = false } = {}) {
+  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>AIが、リライト案を作成しています…<br><span style="font-size:11.5px;color:var(--sub);">記事の内容と検索実績を読み取って、全文をリライトします（30秒〜1分ほどかかります）</span></div></div>`, { active: false });
+  let r;
+  try { r = await postJson('/api/rewrite/start', { mediaId: state.mediaId, articleId: article.id, force }); } catch (e) { if (!e.authExpired) showFatalError(e); return; }
+  if (!r.ok) {
+    await renderArticles();
+    const errEl = document.getElementById('art-error');
+    if (errEl) errEl.textContent = r.data.error === 'wordpress_not_connected' ? 'WordPressに接続されていません' : (r.data.error || 'リライト案を作成できませんでした');
+    return;
+  }
+  renderRewriteResult(r.data.measure);
+}
+
+async function showMeasureById(measureId) {
+  let measures;
+  try { ({ measures } = await api('/api/measures')); } catch (e) { if (!e.authExpired) showFatalError(e); return; }
+  const m = measures.find((x) => x.id === measureId);
+  if (m) renderRewriteResult(m);
+}
+
+function renderRewriteResult(m) {
+  state.screen = 'rewriteResult';
+  state.rewriteMeasureId = m.id;
+  const p = m.proposal;
+  if (!p) { renderMeasures(); return; }
+  const changes = (p.changes || []).map((c) => `
+    <div class="info-box"><div class="h">${esc(c.area || '修正ポイント')}</div>
+      <div><b>問題：</b>${esc(c.issue)}</div><div><b>対応：</b>${esc(c.action)}</div></div>`).join('');
+  const queries = (p.queries || []).map((q) => `<tr style="border-top:1px solid var(--line);"><td style="padding:4px 6px;">${esc(q.query)}</td><td>${q.impressions}</td><td>${q.clicks}</td><td>${q.position}</td></tr>`).join('');
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">リライト施策</div>
+        <h1>リライト案ができました</h1>
+        <p>対象の記事：<a href="${esc(m.article.url)}" target="_blank" rel="noopener">${esc(m.article.title)}</a>　<span class="pill ${m.status === '完了' ? 'ok' : 'blue'}">施策のステータス：${esc(m.status)}</span></p>
+      </div>
+      <div class="card">
+        <h3 style="margin:0 0 6px;">リライトが必要と判断した理由</h3>
+        <ul class="reason-list">${(m.reasons || []).map((r) => `<li>${esc(r)}</li>`).join('') || '<li>定期的な見直し</li>'}</ul>
+        <h3 style="margin:14px 0 6px;">AIの診断</h3>
+        <div class="info-box">${esc(p.diagnosis)}</div>
+        <h3 style="margin:14px 0 6px;">直すポイント</h3>
+        ${changes || '<div style="font-size:12.5px;color:var(--sub);">（なし）</div>'}
+        <h3 style="margin:14px 0 6px;">タイトル案・説明文案</h3>
+        <div class="field-grid">
+          <div class="k">タイトル案</div><div class="v">${esc(p.titleSuggestion)} <button class="btn ghost small" id="rw-copy-title" type="button">コピー</button></div>
+          <div class="k">説明文案</div><div class="v">${esc(p.metaDescription)} <button class="btn ghost small" id="rw-copy-meta" type="button">コピー</button></div>
+        </div>
+        ${queries ? `<h3 style="margin:14px 0 6px;">この記事に流入している検索クエリ（直近28日）</h3><div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:12px;"><tr style="text-align:left;color:var(--sub);"><th style="padding:4px 6px;">クエリ</th><th>表示</th><th>クリック</th><th>順位</th></tr>${queries}</table></div>` : ''}
+        <div style="font-size:11.5px;color:var(--sub);margin-top:10px;">※リライト案の全文は、次の画面で、確認・編集できます。数値・制度・日付などは、AIが断定せず、「【要確認】」として示しています。必ず、人が確認してください。</div>
+        <div class="btn-row">
+          <button class="btn gold" id="rw-open">リライト案を編集して、WordPressに下書き保存 →</button>
+          <button class="btn outline" id="rw-redo">リライト案を作り直す</button>
+          <button class="btn ghost" id="rw-measures">施策管理へ</button>
+          <button class="btn ghost" id="rw-back">← 記事一覧へ</button>
+        </div>
+      </div>
+    </div>
+  `, { active: false });
+  document.getElementById('rw-copy-title').addEventListener('click', () => copyText(p.titleSuggestion));
+  document.getElementById('rw-copy-meta').addEventListener('click', () => copyText(p.metaDescription));
+  document.getElementById('rw-open').addEventListener('click', () => openRewriteEditor(m));
+  document.getElementById('rw-redo').addEventListener('click', () => startRewrite({ id: m.article.wpId }, { force: true }));
+  document.getElementById('rw-measures').addEventListener('click', renderMeasures);
+  document.getElementById('rw-back').addEventListener('click', renderArticles);
+  pushHistory();
+}
+
+// リライト案を、記事の編集画面（画像の自動生成・ボタンのリンク設定・WordPress下書き保存）で開く
+async function openRewriteEditor(m) {
+  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>編集画面を開いています…</div></div>`, { active: false });
+  try {
+    if (!state.registeredMedia || state.registeredMedia.id !== m.regId) await ensureWorkspace({ id: m.regId });
+  } catch (e) { if (!e.authExpired) showFatalError(e); return; }
+  let r;
+  try { r = await postJson('/api/rewrite/session', { mediaId: state.mediaId, measureId: m.id }); } catch (e) { if (!e.authExpired) showFatalError(e); return; }
+  if (!r.ok) { toast(r.data.error || '開けませんでした'); renderMeasures(); return; }
+  state.sessionId = r.data.sessionId;
+  state.theme = r.data.theme;
+  state.article = r.data.article;
+  state.rewriteMeasureId = m.id;
+  state.rewriteArticle = r.data.measure.article;
+  state.wordpressConnected = true; // リライトは、WordPressに接続したメディアで行う（接続が切れていれば、保存時に、接続画面が出る）
+  state.wordpressReal = true;
+  state.publishInfo = null;
+  state.autoImagesFor = null; // 画像が未生成なら、自動生成を始める
+  await loadMediaLinks();
+  applyDefaultCtaLink();
+  state.screen = 'articleEdit';
+  renderArticleEdit();
+}
+
+// ---------------------------------------------------------------
+// 施策管理（リライト施策の表示・操作・効果測定）
+// ---------------------------------------------------------------
+function effectHtml(m) {
+  const b = m.baseline;
+  const last = (m.effects || [])[m.effects.length - 1];
+  const num = (x, unit = '') => (x == null ? '-' : `${x.toLocaleString ? x.toLocaleString() : x}${unit}`);
+  const sign = (d, goodWhenUp, unit = '') => {
+    if (d == null) return '-';
+    if (d === 0) return '±0';
+    const good = goodWhenUp ? d > 0 : d < 0;
+    return `<span style="color:${good ? 'var(--ok)' : 'var(--danger)'};font-weight:700;">${d > 0 ? '+' : ''}${d}${unit}</span>`;
+  };
+  let html = '';
+  if (b) html += `<div style="font-size:11.5px;color:var(--sub);margin-top:6px;">リライト前の実績（施策を作った時点・直近28日${b.period ? `：${esc(b.period.startDate)}〜${esc(b.period.endDate)}` : ''}）：表示 ${num(b.impressions)}回／クリック ${num(b.clicks)}回／クリック率 ${num(b.ctr, '%')}／平均順位 ${num(b.position, '位')}</div>`;
+  if (last) {
+    const a = last.after;
+    const d = last.delta || {};
+    html += `<div style="overflow-x:auto;margin-top:8px;"><table style="width:100%;border-collapse:collapse;font-size:12px;">
+      <tr style="text-align:left;color:var(--sub);"><th style="padding:4px 6px;">効果測定（${esc(fmtD(last.measuredAt))}）</th><th>リライト前</th><th>直近28日</th><th>変化</th></tr>
+      <tr style="border-top:1px solid var(--line);"><td style="padding:4px 6px;">表示回数</td><td>${num(b && b.impressions)}</td><td>${num(a.impressions)}</td><td>${sign(d.impressions, true)}</td></tr>
+      <tr style="border-top:1px solid var(--line);"><td style="padding:4px 6px;">クリック数</td><td>${num(b && b.clicks)}</td><td>${num(a.clicks)}</td><td>${sign(d.clicks, true)}</td></tr>
+      <tr style="border-top:1px solid var(--line);"><td style="padding:4px 6px;">クリック率</td><td>${num(b && b.ctr, '%')}</td><td>${num(a.ctr, '%')}</td><td>${sign(d.ctr, true, '%')}</td></tr>
+      <tr style="border-top:1px solid var(--line);"><td style="padding:4px 6px;">平均順位</td><td>${num(b && b.position, '位')}</td><td>${num(a.position, '位')}</td><td>${sign(d.position, false)}（マイナスが改善）</td></tr>
+    </table></div>
+    <div style="font-size:11px;color:var(--sub);margin-top:4px;">${last.daysSinceRewrite == null ? '※「完了」にした日が記録されていないため、リライトからの日数は不明です。' : last.daysSinceRewrite < 14 ? `※リライト（完了）から${last.daysSinceRewrite}日です。検索順位の変化には時間がかかるため、参考値です。` : `リライト（完了）から${last.daysSinceRewrite}日たっています。`}</div>`;
+  }
+  return html;
+}
+
+function rewriteExtrasHtml(m) {
+  const a = m.article || {};
+  return `<div class="rw-box" style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fafbfd;">
+    <div style="font-size:12.5px;"><span class="pill blue">リライト</span> 対象の記事：<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.title)}</a>${m.mediaName ? `（${esc(m.mediaName)}）` : ''}</div>
+    ${(m.reasons || []).length ? `<ul class="reason-list" style="margin-top:4px;">${m.reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}
+    ${m.draft ? `<div style="font-size:12px;margin-top:4px;">WordPressの下書き：<a href="${esc(m.draft.editUrl)}" target="_blank" rel="noopener">管理画面で開く</a>（保存：${esc(fmtD(m.draft.savedAt))}）</div>` : ''}
+    ${m.rewrittenAt ? `<div style="font-size:12px;margin-top:2px;">リライト（完了）した日：${esc(fmtD(m.rewrittenAt))}</div>` : ''}
+    ${effectHtml(m)}
+    <div class="btn-row" style="margin-top:8px;">
+      ${m.hasRewrite ? '<button class="btn outline small" data-rw="view">リライト案を見る</button><button class="btn navy small" data-rw="edit">編集して下書き保存</button>' : '<button class="btn navy small" data-rw="create">リライト案を作る</button>'}
+      <button class="btn ghost small" data-rw="effect">効果を測定する</button>
+    </div>
+    ${m.status !== '完了' ? '<div style="font-size:11px;color:var(--sub);margin-top:4px;">リライトを公開したら、ステータスを「完了」にしてください（効果測定の基準日になります）。</div>' : ''}
+  </div>`;
+}
+
+function bindRewriteActions(card, id) {
+  const m = measureCache.find((x) => x.id === id);
+  if (!m || m.kind !== 'rewrite') return;
+  card.querySelectorAll('[data-rw]').forEach((b) => b.addEventListener('click', async () => {
+    const act = b.dataset.rw;
+    try {
+      if (!state.registeredMedia || state.registeredMedia.id !== m.regId) await ensureWorkspace({ id: m.regId });
+    } catch (e) { if (!e.authExpired) toast('このメディアの登録が見つかりません（削除された可能性があります）'); return; }
+    if (act === 'view') renderRewriteResult(m);
+    else if (act === 'edit') openRewriteEditor(m);
+    else if (act === 'create') startRewrite({ id: m.article.wpId });
+    else if (act === 'effect') {
+      b.disabled = true;
+      b.textContent = '測定しています…';
+      try {
+        const r = await postJson(`/api/measures/${m.id}/effect`, { mediaId: state.mediaId });
+        if (!r.ok) { toast(r.data.error || '測定できませんでした'); b.disabled = false; b.textContent = '効果を測定する'; return; }
+        measureCache = measureCache.map((x) => (x.id === m.id ? { ...x, ...r.data.measure } : x));
+        drawMeasures();
+        toast('効果を測定しました');
+      } catch (e) { if (!e.authExpired) toast('測定できませんでした'); }
+    }
+  }));
+}
+
 async function measureApi(method, path, body) {
   const res = await fetch(path, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
   const data = await res.json().catch(() => ({}));
@@ -2522,7 +2881,7 @@ function drawMeasures({ keepDraft = true } = {}) {
         <span class="pill ${STATUS_PILL[m.status]}">${esc(m.status)}</span>
         <select data-act="status" aria-label="ステータスを変更">${options(m.status)}</select>
       </div>
-      ${m.memo ? `<div class="memo">${esc(m.memo)}</div>` : ''}
+      ${m.kind === 'rewrite' ? rewriteExtrasHtml(m) : (m.memo ? `<div class="memo">${esc(m.memo)}</div>` : '')}
       <div class="meta">登録：${fmt(m.createdAt)} ／ 更新：${fmt(m.updatedAt)}</div>
       <div class="btn-row" style="margin-top:2px;">
         ${m.id === deletingId
@@ -2566,6 +2925,7 @@ function drawMeasures({ keepDraft = true } = {}) {
   app.querySelectorAll('[data-filter]').forEach((b) => b.addEventListener('click', () => { state.measuresFilter = b.dataset.filter; drawMeasures(); }));
   app.querySelectorAll('.measure').forEach((card) => {
     const id = card.dataset.id;
+    bindRewriteActions(card, id);
     card.querySelectorAll('[data-act]').forEach((el) => {
       const act = el.dataset.act;
       if (act === 'status') el.addEventListener('change', () => updateMeasure(id, { status: el.value }, `ステータスを「${el.value}」に変更しました`));
@@ -2641,6 +3001,9 @@ const SCREEN_RENDERERS = {
   published: renderPublishedStatus,
   publishError: () => renderPublishError(state.publishErrorMessage || ''),
   export: renderExport,
+  articles: renderArticles,
+  articlesPick: renderArticlesPickMedia,
+  rewriteResult: () => { if (state.rewriteMeasureId) showMeasureById(state.rewriteMeasureId); else renderArticles(); },
   mediaChoice: renderMediaChoice,
   mediaRegister: renderMediaRegister,
   mediaList: renderMediaList,

@@ -389,7 +389,8 @@ function install(app) {
 
   // ---- 施策のステータス管理（ログイン中のアカウント自身のデータだけを扱う） ----
   const mine = (user) => db.measures.filter((m) => m.userId === user.id);
-  const view = ({ userId, ...m }) => m;
+  // 一覧に出す形：ユーザーIDと、容量の大きい「リライト後の記事本文」は除く（本文は、開くときに別に取得する）
+  const view = ({ userId, rewrite, ...m }) => ({ ...m, hasRewrite: !!rewrite });
 
   app.get('/api/measures', requireEnabled, requireLogin, (req, res) => {
     const list = mine(req.user).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -414,7 +415,11 @@ function install(app) {
     const m = mine(req.user).find((x) => x.id === req.params.id); // 他のアカウントの施策は、存在しないものとして扱う
     if (!m) return res.status(404).json({ error: '施策が見つかりません' });
     try {
-      Object.assign(m, cleanMeasureInput(req.body || {}, { partial: true }), { updatedAt: new Date().toISOString() });
+      const input = cleanMeasureInput(req.body || {}, { partial: true });
+      const now = new Date().toISOString();
+      // リライトの施策を「完了」にした日を、リライト（公開）した日として記録する（効果測定の基準日）
+      if (input.status === '完了' && m.status !== '完了' && m.kind === 'rewrite' && !m.rewrittenAt) m.rewrittenAt = now;
+      Object.assign(m, input, { updatedAt: now });
       save();
       res.json({ measure: view(m) });
     } catch (e) {
@@ -431,4 +436,22 @@ function install(app) {
   });
 }
 
-module.exports = { install, STATUSES, ENABLED, setIntegration, getIntegration, getRegisteredMedia, updateRegisteredMedia };
+// 施策の作成・取得・更新（リライト機能など、他のモジュールから使う）
+function createMeasure(userId, fields) {
+  const now = new Date().toISOString();
+  const m = { id: crypto.randomBytes(6).toString('hex'), userId, title: '', memo: '', status: STATUSES[0], createdAt: now, updatedAt: now, ...fields };
+  db.measures.push(m);
+  save();
+  return m;
+}
+const findMeasure = (userId, id) => db.measures.find((m) => m.userId === userId && m.id === id) || null;
+function updateMeasure(userId, id, patch) {
+  const m = findMeasure(userId, id);
+  if (!m) return null;
+  Object.assign(m, patch, { updatedAt: new Date().toISOString() });
+  save();
+  return m;
+}
+const listMeasures = (userId) => db.measures.filter((m) => m.userId === userId);
+
+module.exports = { install, createMeasure, findMeasure, updateMeasure, listMeasures, STATUSES, ENABLED, setIntegration, getIntegration, getRegisteredMedia, updateRegisteredMedia };

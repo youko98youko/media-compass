@@ -319,8 +319,80 @@ async function saveDraftXmlRpc(cfg, { title, html, featuredMedia, existingId }) 
   return { id, previewUrl: link || `${cfg.siteUrl}/?p=${id}&preview=true`, editUrl: `${cfg.siteUrl}/wp-admin/post.php?post=${id}&action=edit`, status: 'draft' };
 }
 
+// ---------------------------------------------------------------
+// 投稿済みの記事の取得（リライトの対象を探すため）。読み取りのみで、WordPress側は何も変更しない。
+// ---------------------------------------------------------------
+const MAX_POSTS = 500;
+
+// XML-RPCの日付（例：20161001T10:00:00。GMT）を、ISO形式にする
+function xmlDate(v) {
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2}):(\d{2}):(\d{2})/.exec(String(v || ''));
+  return m ? `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z` : (v ? String(v) : null);
+}
+
+// 公開済みの記事の一覧（更新が新しい順）：{ id, title, url, date, modified }
+async function listPublishedPosts(cfg, { max = MAX_POSTS } = {}) {
+  const out = [];
+  if (cfg.method === 'xmlrpc') {
+    const per = 100;
+    for (let offset = 0; offset < max; offset += per) {
+      const rows = await xmlrpc(cfg, 'wp.getPosts', [cfg.blogId, cfg.username, cfg.password,
+        { post_type: 'post', post_status: 'publish', number: per, offset, orderby: 'post_modified', order: 'DESC' },
+        ['post_id', 'post_title', 'post_date_gmt', 'post_modified_gmt', 'link']]);
+      if (!Array.isArray(rows) || !rows.length) break;
+      for (const r of rows) out.push({ id: Number(r.post_id), title: String(r.post_title || ''), url: r.link, date: xmlDate(r.post_date_gmt), modified: xmlDate(r.post_modified_gmt) });
+      if (rows.length < per) break;
+    }
+  } else {
+    const per = 100;
+    for (let page = 1; out.length < max; page++) {
+      let rows;
+      try {
+        rows = await request(cfg, `/wp/v2/posts?status=publish&per_page=${per}&page=${page}&orderby=modified&order=desc&_fields=id,title,link,date_gmt,modified_gmt`);
+      } catch (e) {
+        if (e.status === 400 && page > 1) break; // ページ範囲外
+        throw e;
+      }
+      if (!Array.isArray(rows) || !rows.length) break;
+      for (const r of rows) out.push({ id: r.id, title: String(r.title?.rendered || '').replace(/<[^>]*>/g, ''), url: r.link, date: r.date_gmt ? `${r.date_gmt}Z` : null, modified: r.modified_gmt ? `${r.modified_gmt}Z` : null });
+      if (rows.length < per) break;
+    }
+  }
+  return out.slice(0, max);
+}
+
+// 記事1本の、現在のタイトルと本文（HTML）
+async function getPostContent(cfg, id) {
+  if (cfg.method === 'xmlrpc') {
+    const p = await xmlrpc(cfg, 'wp.getPost', [cfg.blogId, cfg.username, cfg.password, Number(id), ['post_title', 'post_content', 'link', 'post_modified_gmt', 'post_status']]);
+    return { id: Number(id), title: String(p.post_title || ''), html: String(p.post_content || ''), url: p.link, modified: xmlDate(p.post_modified_gmt), status: p.post_status };
+  }
+  const p = await request(cfg, `/wp/v2/posts/${Number(id)}?context=edit&_fields=id,title,content,link,modified_gmt,status`);
+  return { id: p.id, title: String(p.title?.raw ?? p.title?.rendered ?? ''), html: String(p.content?.raw ?? p.content?.rendered ?? ''), url: p.link, modified: p.modified_gmt ? `${p.modified_gmt}Z` : null, status: p.status };
+}
+
+// AIに渡すための、記事の構成と内容（見出し・段落・リスト・表）を、テキストにする
+function htmlToOutline(html, { maxChars = 14000 } = {}) {
+  const $ = cheerio.load(`<div id="root">${String(html || '')}</div>`);
+  $('script,style,noscript').remove();
+  const lines = [];
+  $('#root').find('h1,h2,h3,h4,p,li,blockquote,th,td,figcaption,img').each((_, el) => {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'img') { const alt = $(el).attr('alt'); if (alt) lines.push(`[画像: ${alt}]`); return; }
+    if (tag === 'blockquote') return; // 引用の中の段落は、個別に拾う
+    const text = $(el).text().replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    if (/^h[1-4]$/.test(tag)) lines.push(`${'#'.repeat(Number(tag[1]))} ${text}`);
+    else if (tag === 'li') lines.push(`- ${text}`);
+    else if (tag === 'th' || tag === 'td') lines.push(`| ${text}`);
+    else lines.push(text);
+  });
+  const joined = lines.join('\n');
+  return joined.length > maxChars ? `${joined.slice(0, maxChars)}\n（以下、長いため省略）` : joined;
+}
+
 // 接続方式（REST API／XML-RPC）に合わせて、画像のアップロードと下書きの保存を切り替える
 const uploadMedia = (cfg, args) => (cfg.method === 'xmlrpc' ? uploadMediaXmlRpc(cfg, args) : uploadMediaRest(cfg, args));
 const saveDraft = (cfg, args) => (cfg.method === 'xmlrpc' ? saveDraftXmlRpc(cfg, args) : saveDraftRest(cfg, args));
 
-module.exports = { connect, connectXmlRpc, uploadMedia, blocksToHtml, saveDraft };
+module.exports = { connect, connectXmlRpc, uploadMedia, blocksToHtml, saveDraft, listPublishedPosts, getPostContent, htmlToOutline };

@@ -19,6 +19,7 @@ const { crawlSite } = require('./crawler');
 const gsc = require('./gsc');
 const images = require('./images');
 const wordpress = require('./wordpress');
+const rewrite = require('./rewrite');
 const crypto = require('crypto');
 
 const app = express();
@@ -267,6 +268,23 @@ app.post('/api/media/state', (req, res) => {
     directionConfirmed: false,
   });
   res.json({ mediaId, registered: reg ? { id: reg.id, name: reg.name, siteUrl: reg.siteUrl } : null });
+});
+
+// 登録済みメディアの作業環境（WordPress・GSCの接続などを持つ）を、あれば再利用し、なければ作る。
+// 記事一覧・リライト・効果測定の画面で使う（サーバーを再起動しても、画面から、そのまま開き直せる）。
+app.post('/api/media/ensure', (req, res) => {
+  const reg = req.user ? accounts.getRegisteredMedia(req.user.id, String(req.body?.registeredId || '')) : null;
+  if (!reg) return res.status(404).json({ error: '登録済みのメディアが見つかりません' });
+  let m = [...mediaProfiles.values()].reverse().find((x) => x.userId === req.user.id && x.regId === reg.id && x.mediaState === 'existing');
+  if (!m) {
+    const mediaId = newId('media');
+    m = {
+      id: mediaId, userId: req.user.id, regId: reg.id, mediaState: 'existing', siteUrl: reg.siteUrl, businessInfo: null, wordpress: null,
+      hearing: { history: [], lastQuestion: null, done: false, maxQuestions: 4 }, existingAnalysis: null, topicClusters: null, directionConfirmed: false,
+    };
+    mediaProfiles.set(mediaId, m);
+  }
+  res.json({ mediaId: m.id, registered: { id: reg.id, name: reg.name, siteUrl: reg.siteUrl } });
 });
 
 // STEP 0-2a: 既存メディア理解（3.2）
@@ -888,6 +906,7 @@ app.post('/api/article/save', (req, res) => {
   const { article } = req.body || {};
   if (!article) return res.status(400).json({ error: 'article required' });
   s.article = article;
+  rewrite.onArticleSaved(s);
   res.json({ ok: true });
 });
 
@@ -997,7 +1016,7 @@ async function publishToWordPress(s, wp) {
     if (b.role === 'hero' && !featured) featured = s.wpMedia[b.src].id;
   }
   const draft = await wordpress.saveDraft(wp.cfg, {
-    title: s.article.title,
+    title: `${s.titlePrefix || ''}${s.article.title}`, // リライト案は、「【リライト案】」を付けて、元の記事と区別する
     html: wordpress.blocksToHtml(blocks, imageUrls),
     featuredMedia: featured,
     existingId: s.wpDraftId,
@@ -1015,6 +1034,8 @@ async function publishToWordPress(s, wp) {
     skippedImages: skipped,
     hasFeatured: !!featured,
     savedAt: new Date().toISOString(),
+    measureId: s.measureId || null,
+    isRewrite: !!s.measureId,
   };
 }
 
@@ -1028,7 +1049,9 @@ app.post('/api/publish', async (req, res) => {
   if (req.body?.expectWordpress && !wp?.real) return res.status(409).json({ error: 'wordpress_not_connected' });
   if (wp?.real) {
     try {
-      return res.json(await publishToWordPress(s, wp));
+      const info = await publishToWordPress(s, wp);
+      rewrite.onDraftSaved(s, info); // リライトの施策なら、「確認待ち」にして、下書きの情報を記録する
+      return res.json(info);
     } catch (e) {
       console.warn('[WordPress投稿失敗]', e.message);
       return res.status(502).json({ error: e.message });
@@ -1093,6 +1116,9 @@ app.post('/api/rewrite', async (req, res) => {
 
   res.json({ ...data, mode });
 });
+
+// 投稿済み記事のリライト支援（記事の取り込み・リライト候補・リライト案・効果測定）
+rewrite.install(app, { ownedMedia, loadWp, loadGsc, applyRegisteredSite, getStructured, AI_ENABLED, sessions, newId });
 
 app.listen(PORT, () => {
   console.log(`メディアコンパス極プロトタイプ起動: http://localhost:${PORT}`);
