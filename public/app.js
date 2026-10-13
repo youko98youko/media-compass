@@ -1249,12 +1249,47 @@ async function confirmDirection() {
   renderDashboard();
 }
 
-function renderDirectionSummary() {
+async function renderDirectionSummary() {
   state.screen = 'direction';
+  // ローカル版：方向性は、登録済みメディアごとにサーバーに保存されている。対象のメディアを決めて、取得する。
+  let regList = null;
+  let dirState = null;
+  if (state.accountsEnabled && state.user) {
+    shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>メディアの方向性を読み込んでいます…</div></div>`, { active: false });
+    try {
+      ({ media: regList } = await api('/api/registered-media'));
+      const cur = regList.find((x) => x.id === (state.registeredMedia && state.registeredMedia.id)) || regList[0];
+      if (cur) {
+        await ensureWorkspace(cur);
+        dirState = await api(`/api/media/direction-state?mediaId=${encodeURIComponent(state.mediaId)}`);
+        state.direction = dirState.clusters ? { clusters: dirState.clusters, topCluster: dirState.topCluster } : null;
+      }
+    } catch (e) { if (e.authExpired) return; regList = regList || []; }
+  }
   const clusters = state.direction?.clusters || [];
-  const rows = clusters.length
-    ? clusters.map(clusterCardHtml).join('')
-    : '<div class="card">まだメディアの方向性が設計されていません。</div>';
+  const mediaPickHtml = regList && regList.length ? `
+      <div class="card">
+        <label for="dir-media" style="display:block;font-size:12.5px;font-weight:700;color:var(--sub);margin-bottom:4px;">対象のメディア</label>
+        <select id="dir-media" style="font-family:inherit;font-size:14px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;max-width:100%;">
+          ${regList.map((x) => `<option value="${esc(x.id)}" ${state.registeredMedia && x.id === state.registeredMedia.id ? 'selected' : ''}>${esc(x.name)}（${esc(x.siteUrl)}）</option>`).join('')}
+        </select>
+      </div>` : '';
+  const emptyHtml = `
+      <div class="card">
+        <h3 style="margin:0 0 6px;">まだメディアの方向性が設計されていません</h3>
+        <p style="font-size:13px;color:var(--sub);margin:0 0 10px;">方向性は、既存メディアの分析結果をもとに、AIが設計します。次の順で進めてください。</p>
+        <ol style="font-size:13px;line-height:1.9;margin:0 0 12px;padding-left:20px;">
+          <li>上のメニューの「ホーム」から、「既存メディアを分析する」を選ぶ</li>
+          <li>登録済みのメディアを選び、サイトの分析を実行する（GSCは、つないでおくと分析に使われます）</li>
+          <li>分析結果の画面で、「メディアの方向性を見る」を押す（ここでAIが方向性を設計します）</li>
+          <li>内容を確認して、「この方向性で進める」を押す</li>
+        </ol>
+        <div class="btn-row">
+          ${dirState && dirState.hasAnalysis ? '<button class="btn gold" id="dir-design">分析結果をもとに、方向性を設計する →</button>' : ''}
+          <button class="btn ${dirState && dirState.hasAnalysis ? 'outline' : 'navy'}" id="dir-go-home">ホーム（既存メディアを分析する）へ →</button>
+        </div>
+      </div>`;
+  const rows = clusters.length ? clusters.map(clusterCardHtml).join('') : emptyHtml;
 
   shell(`
     <div class="wrap">
@@ -1263,9 +1298,20 @@ function renderDirectionSummary() {
         <h1>テーマ領域と優先度</h1>
         <p>「今、作るべき記事テーマ」は、このテーマ領域の設計結果を踏まえて提示されます（3.4）。</p>
       </div>
+      ${mediaPickHtml}
       ${rows}
+      ${clusters.length && dirState && dirState.hasAnalysis ? '<div class="btn-row"><button class="btn outline" id="dir-design">方向性を設計し直す</button></div>' : ''}
     </div>
   `, { active: false });
+  const sel = document.getElementById('dir-media');
+  if (sel) sel.addEventListener('change', () => {
+    state.registeredMedia = regList.find((x) => x.id === sel.value) || state.registeredMedia;
+    renderDirectionSummary();
+  });
+  const design = document.getElementById('dir-design');
+  if (design) design.addEventListener('click', renderDirectionGenerating);
+  const goHome = document.getElementById('dir-go-home');
+  if (goHome) goHome.addEventListener('click', renderMediaState);
   pushHistory();
 }
 

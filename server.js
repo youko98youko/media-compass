@@ -270,6 +270,11 @@ app.post('/api/media/state', (req, res) => {
   res.json({ mediaId, registered: reg ? { id: reg.id, name: reg.name, siteUrl: reg.siteUrl } : null });
 });
 
+// 登録済みメディアには、既存メディアの分析結果と、設計した方向性を覚えておく（サーバーを再起動しても、画面を開き直しても、見られるように）。
+function persistReg(req, m, patch) {
+  if (req.user && m && m.regId) accounts.updateRegisteredMedia(req.user.id, m.regId, patch);
+}
+
 // 登録済みメディアの作業環境（WordPress・GSCの接続などを持つ）を、あれば再利用し、なければ作る。
 // 記事一覧・リライト・効果測定の画面で使う（サーバーを再起動しても、画面から、そのまま開き直せる）。
 app.post('/api/media/ensure', (req, res) => {
@@ -280,7 +285,8 @@ app.post('/api/media/ensure', (req, res) => {
     const mediaId = newId('media');
     m = {
       id: mediaId, userId: req.user.id, regId: reg.id, mediaState: 'existing', siteUrl: reg.siteUrl, businessInfo: null, wordpress: null,
-      hearing: { history: [], lastQuestion: null, done: false, maxQuestions: 4 }, existingAnalysis: null, topicClusters: null, directionConfirmed: false,
+      hearing: { history: [], lastQuestion: null, done: false, maxQuestions: 4 },
+      existingAnalysis: reg.analysis || null, topicClusters: reg.direction?.clusters || null, directionConfirmed: !!reg.direction?.confirmed,
     };
     mediaProfiles.set(mediaId, m);
   }
@@ -420,6 +426,7 @@ app.post('/api/media/understand-existing', async (req, res) => {
   if (!AI_ENABLED || useDemo) {
     const analysis = { ...buildExistingAnalysis(!!withGsc, !!withWordpress), real: false };
     m.existingAnalysis = analysis;
+    persistReg(req, m, { analysis });
     return res.json({ analysis });
   }
 
@@ -475,6 +482,7 @@ app.post('/api/media/understand-existing', async (req, res) => {
     headingSample: crawl.pages.slice(0, 3).map((p) => ({ title: p.title, headings: p.h2.slice(0, 6).map((h) => `H2：${h}`) })),
   };
   m.existingAnalysis = analysis;
+  persistReg(req, m, { analysis });
   res.json({ analysis });
 });
 
@@ -605,6 +613,8 @@ app.post('/api/media/direction', async (req, res) => {
   });
 
   m.topicClusters = data.clusters;
+  m.directionConfirmed = false;
+  persistReg(req, m, { direction: { clusters: data.clusters, confirmed: false, savedAt: new Date().toISOString() } });
   m.themes = null; // 方向性が変わったらテーマ候補は再生成する
   res.json({ clusters: data.clusters, topCluster: topClusterOf(data.clusters), mode });
 });
@@ -613,7 +623,20 @@ app.post('/api/media/confirm-direction', (req, res) => {
   const m = getMediaProfile(req, res);
   if (!m) return;
   m.directionConfirmed = true;
+  if (m.topicClusters) persistReg(req, m, { direction: { clusters: m.topicClusters, confirmed: true, savedAt: new Date().toISOString() } });
   res.json({ ok: true });
+});
+
+// 「メディアの方向性」画面用：このメディアの、設計済みの方向性（なければ、設計に必要な分析が済んでいるか）
+app.get('/api/media/direction-state', (req, res) => {
+  const m = getMediaByQuery(req, res);
+  if (!m) return;
+  res.json({
+    clusters: m.topicClusters || null,
+    topCluster: m.topicClusters ? topClusterOf(m.topicClusters) : null,
+    confirmed: !!m.directionConfirmed,
+    hasAnalysis: !!m.existingAnalysis,
+  });
 });
 
 // ---------------------------------------------------------------
