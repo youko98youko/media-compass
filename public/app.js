@@ -205,22 +205,20 @@ function placeholderImageDataUri(alt, w, h) {
 // ---------------------------------------------------------------
 // 共通シェル
 // ---------------------------------------------------------------
-function shell(innerHtml, { active = true, nav = true } = {}) {
+function shell(innerHtml, { active = true } = {}) {
   const idx = stepIndexFor(state.screen);
   const stepperHtml = active
     ? `<div class="stepper">${STEPS.map((s, i) => `<span class="st ${i < idx ? 'done' : ''} ${i === idx ? 'active' : ''}"><span class="n">${i < idx ? '✓' : i + 1}</span>${s}</span>${i < STEPS.length - 1 ? '<span class="arrow">→</span>' : ''}`).join('')}</div>`
     : '';
-  const navHtml = nav ? `
+  // 上部メニューは、どの画面でも同じ並びで出す（ステータスによって、メニューが変わらないようにする）
+  const navHtml = `
       <div class="nav">
         <span class="${state.screen === 'dashboard' ? 'on' : ''}" data-nav="dashboard">ホーム</span>
         <span class="${state.screen === 'direction' ? 'on' : ''}" data-nav="direction">メディアの方向性</span>
         ${state.accountsEnabled ? `<span class="${['measures', 'auth'].includes(state.screen) ? 'on' : ''}" data-nav="measures">施策管理</span>` : ''}
         <span class="${['articles', 'articlesPick', 'rewriteResult'].includes(state.screen) ? 'on' : ''}" data-nav="monitoring">記事一覧・監視</span>
         <span class="${state.screen === 'settings' ? 'on' : ''}" data-nav="settings">設定</span>
-      </div>` : state.accountsEnabled ? `
-      <div class="nav">
-        <span class="${['measures', 'auth'].includes(state.screen) ? 'on' : ''}" data-nav="measures">施策管理</span>
-      </div>` : ''; // 最初の画面などメニューを出さない画面でも、アカウント機能（施策管理）への入口だけは出す
+      </div>`;
   app.innerHTML = `
     <div class="appbar">
       <span class="brand">メディアコンパス極</span>
