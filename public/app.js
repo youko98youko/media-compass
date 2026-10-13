@@ -221,8 +221,9 @@ function shell(innerHtml, { active = true } = {}) {
       <div class="nav">
         <span class="${['mediaState', 'mediaChoice'].includes(state.screen) ? 'on' : ''}" data-nav="dashboard">ホーム</span>
         <span class="${state.screen === 'direction' ? 'on' : ''}" data-nav="direction">メディアの方向性</span>
-        ${state.accountsEnabled ? `<span class="${['measures', 'auth'].includes(state.screen) ? 'on' : ''}" data-nav="measures">施策管理</span>` : ''}
-        <span class="${['articles', 'articlesPick', 'rewriteResult'].includes(state.screen) ? 'on' : ''}" data-nav="monitoring">記事一覧・監視</span>
+        ${state.accountsEnabled
+          ? `<span class="${['measures', 'auth', 'articles', 'articlesPick', 'rewriteResult'].includes(state.screen) ? 'on' : ''}" data-nav="measures">施策管理</span>`
+          : `<span class="${state.screen === 'monitoring' ? 'on' : ''}" data-nav="monitoring">記事一覧・監視</span>`}
         <span class="${state.screen === 'settings' ? 'on' : ''}" data-nav="settings">設定</span>
       </div>`;
   app.innerHTML = `
@@ -243,7 +244,7 @@ function shell(innerHtml, { active = true } = {}) {
   app.querySelectorAll('[data-nav]').forEach((elm) => {
     elm.addEventListener('click', () => {
       if (elm.dataset.nav === 'dashboard') renderMediaState(); // ホーム＝最初の画面（メディア状態の選択）
-      if (elm.dataset.nav === 'monitoring') (state.accountsEnabled && state.user ? renderArticles() : renderMonitoring()); // ローカル版は、投稿済み記事の一覧とリライト
+      if (elm.dataset.nav === 'monitoring') renderMonitoring(); // 公開デモ版のみ（ローカル版は、施策管理の中の「記事一覧」に統合）
       if (elm.dataset.nav === 'direction') renderDirectionSummary();
       if (elm.dataset.nav === 'settings') renderSettings();
       if (elm.dataset.nav === 'measures') (state.user ? renderMeasures() : renderAuth());
@@ -1275,16 +1276,40 @@ async function renderSettings() {
   state.screen = 'settings';
   const connected = !!state.wordpressConnected;
 
+  // ローカル版：GSCのサイトとWordPressの接続は、登録済みメディアごとに保存されている。
+  // 対象のメディアを決めてから接続状況を取得する（決めないと、接続済みでも「未接続」と表示されてしまう）。
+  let regList = null;
+  if (state.accountsEnabled && state.user) {
+    shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>連携の状況を確認しています…</div></div>`, { active: false });
+    try {
+      ({ media: regList } = await api('/api/registered-media'));
+      const cur = regList.find((x) => x.id === (state.registeredMedia && state.registeredMedia.id)) || regList[0];
+      if (cur) await ensureWorkspace(cur);
+    } catch (e) { if (e.authExpired) return; regList = regList || []; }
+  }
+  const hasMedia = !!state.mediaId && !(regList && !regList.length);
+  const mediaPickHtml = regList ? (regList.length ? `
+      <div class="card">
+        <label for="set-media" style="display:block;font-size:12.5px;font-weight:700;color:var(--sub);margin-bottom:4px;">対象のメディア</label>
+        <select id="set-media" style="font-family:inherit;font-size:14px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;max-width:100%;">
+          ${regList.map((x) => `<option value="${esc(x.id)}" ${state.registeredMedia && x.id === state.registeredMedia.id ? 'selected' : ''}>${esc(x.name)}（${esc(x.siteUrl)}）</option>`).join('')}
+        </select>
+        <div style="font-size:11.5px;color:var(--sub);margin-top:6px;">Google Search Consoleのアカウント連携は、アカウント全体で共通です。分析するサイトの選択と、WordPressの接続は、メディアごとに保存されます。</div>
+      </div>` : `
+      <div class="missing-box">
+        <div class="h">登録済みのメディアがありません</div>「ホーム」から「既存メディアを分析する」を選んで、メディアを登録すると、ここで接続状況を確認できます。
+      </div>`) : '';
+
   // Google Search Console の現在の連携状況（実連携はサーバーに保持されているので、その都度取得する）
   let gscStatus = { connected: false };
-  if (state.mediaId) {
+  if (hasMedia) {
     try { gscStatus = await api('/api/gsc/status', { body: { mediaId: state.mediaId } }); } catch (e) { /* 取得できなければ未接続として表示 */ }
   }
   const gscDemo = !gscStatus.connected && !!state.gscDemo;
 
   // WordPressの現在の接続状況（実接続はサーバーに保持されているので、その都度取得する）
   let wpStatus = { connected: false };
-  if (state.mediaId) {
+  if (hasMedia) {
     try { wpStatus = await api('/api/wordpress/status', { body: { mediaId: state.mediaId } }); } catch (e) { /* 取得できなければ未接続として表示 */ }
   }
   const wpDemo = !wpStatus.connected && connected && !state.wordpressReal;
@@ -1307,7 +1332,7 @@ async function renderSettings() {
         <div class="btn-row">
           <button class="btn navy" id="gsc-real-connect">実際のGSCと連携する →</button>
           <button class="btn ghost" id="gsc-demo-off">デモ連携を解除する</button>
-        </div>` : state.mediaId ? `
+        </div>` : hasMedia ? `
         <div class="missing-box">
           <div class="h">未接続</div>まだGoogle Search Consoleと連携していません。連携すると、検索クエリ・掲載順位などの実績を分析に使えます。
         </div>
@@ -1323,6 +1348,7 @@ async function renderSettings() {
         <h1>連携の設定</h1>
         <p>Google Search Console と WordPress の接続状況を確認し、変更できます。</p>
       </div>
+      ${mediaPickHtml}
       <div class="card">
         <h3 style="margin:0 0 4px;">Google Search Console</h3>
         <p style="font-size:12.5px;color:var(--sub);margin:0 0 10px;">既存メディアの分析で、検索クエリ・掲載順位・ページ別の実績を取得するために使います（読み取り専用）。</p>
@@ -1352,7 +1378,7 @@ async function renderSettings() {
             <button class="btn navy" id="wp-connect-settings">実際のWordPressと接続する →</button>
             <button class="btn ghost" id="wp-disconnect">デモ接続を解除する</button>
           </div>
-        ` : state.mediaId ? `
+        ` : hasMedia ? `
           <div class="missing-box">
             <div class="h">未接続</div>まだWordPressと接続していません。記事を投稿する際に接続を求められますが、ここから先に接続しておくこともできます。
           </div>
@@ -1366,6 +1392,11 @@ async function renderSettings() {
     </div>
   `, { active: false });
 
+  const mediaSel = document.getElementById('set-media');
+  if (mediaSel) mediaSel.addEventListener('change', () => {
+    state.registeredMedia = regList.find((x) => x.id === mediaSel.value) || state.registeredMedia;
+    renderSettings();
+  });
   const gscConnectBtn = document.getElementById('gsc-real-connect');
   if (gscConnectBtn) gscConnectBtn.addEventListener('click', () => { state.gscContext = 'settings'; state.gscReconnect = !!gscStatus.connected; renderGscConnect(); });
   const gscChange = document.getElementById('gsc-change-site');
@@ -2457,6 +2488,19 @@ async function ensureWorkspace(reg) {
   return e;
 }
 
+// 施策管理の中の切り替え：施策一覧 ／ 記事一覧・リライト
+function mgmtTabsHtml(active) {
+  return `<div class="mtabs">
+    <button class="mtab ${active === 'measures' ? 'on' : ''}" data-mtab="measures">施策一覧</button>
+    <button class="mtab ${active === 'articles' ? 'on' : ''}" data-mtab="articles">記事一覧・リライト</button>
+  </div>`;
+}
+function bindMgmtTabs() {
+  app.querySelectorAll('[data-mtab]').forEach((b) => b.addEventListener('click', () => {
+    if (b.dataset.mtab === 'measures') renderMeasures(); else renderArticles();
+  }));
+}
+
 // メディアを選ぶ（記事一覧に入るとき、メディアが決まっていない場合）
 async function renderArticlesPickMedia() {
   state.screen = 'articlesPick';
@@ -2472,14 +2516,16 @@ async function renderArticlesPickMedia() {
     </div>`).join('');
   shell(`
     <div class="wrap">
+      ${mgmtTabsHtml('articles')}
       <div class="screen-head">
-        <div class="eyebrow">記事一覧・リライト</div>
+        <div class="eyebrow">施策管理 ・ 記事一覧・リライト</div>
         <h1>どのメディアの記事を見ますか？</h1>
         <p>登録済みのメディアから選んでください。</p>
       </div>
       ${items || '<div class="card" style="color:var(--sub);font-size:13px;">登録済みのメディアがありません。「既存メディアを分析する」から、メディアを登録してください。</div>'}
     </div>
   `, { active: false });
+  bindMgmtTabs();
   app.querySelectorAll('[data-reg]').forEach((c) => c.addEventListener('click', async () => {
     const reg = media.find((m) => m.id === c.dataset.reg);
     state.registeredMedia = reg;
@@ -2549,8 +2595,9 @@ function drawArticles() {
 
   shell(`
     <div class="wrap">
+      ${mgmtTabsHtml('articles')}
       <div class="screen-head">
-        <div class="eyebrow">記事一覧・リライト</div>
+        <div class="eyebrow">施策管理 ・ 記事一覧・リライト</div>
         <h1>${esc(d.media.name)} の記事</h1>
         <p>投稿済みの記事を、検索実績と照らし合わせて、リライトの候補を出します。</p>
       </div>
@@ -2558,7 +2605,6 @@ function drawArticles() {
         <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
           <button class="btn navy small" id="art-sync">${d.syncedAt ? '最新の状態に更新する' : '記事を取り込む（WordPress＋GSC）'}</button>
           <button class="btn ghost small" id="art-switch">メディアを切り替える</button>
-          <button class="btn ghost small" id="art-measures">施策管理へ</button>
           <span style="font-size:11.5px;color:var(--sub);">${d.syncedAt ? `最終取り込み：${esc(new Date(d.syncedAt).toLocaleString('ja-JP'))}　${all.length}本` : 'まだ記事を取り込んでいません。'}${per ? `<br>検索実績の期間：${esc(per)}` : ''}</span>
         </div>
         ${d.note ? `<div class="missing-box" style="margin-top:10px;">${esc(d.note)}</div>` : ''}
@@ -2576,7 +2622,7 @@ function drawArticles() {
 
   document.getElementById('art-sync').addEventListener('click', syncArticles);
   document.getElementById('art-switch').addEventListener('click', () => { state.registeredMedia = null; renderArticlesPickMedia(); });
-  document.getElementById('art-measures').addEventListener('click', renderMeasures);
+  bindMgmtTabs();
   app.querySelectorAll('[data-filter]').forEach((b) => b.addEventListener('click', () => { articlesFilter = b.dataset.filter; articlesPage = 1; drawArticles(); }));
   const prev = document.getElementById('art-prev');
   const next = document.getElementById('art-next');
@@ -2897,6 +2943,7 @@ function drawMeasures({ keepDraft = true } = {}) {
 
   shell(`
     <div class="wrap">
+      ${mgmtTabsHtml('measures')}
       <div class="screen-head">
         <div class="eyebrow">施策管理</div>
         <h1>施策のステータス管理</h1>
@@ -2918,6 +2965,7 @@ function drawMeasures({ keepDraft = true } = {}) {
       ${items || `<div class="card" style="color:var(--sub);font-size:13px;">${measureCache.length ? 'この条件に当てはまる施策はありません。' : 'まだ施策が登録されていません。上のフォームから登録してください。'}</div>`}
     </div>
   `, { active: false });
+  bindMgmtTabs();
 
   document.getElementById('m-logout').addEventListener('click', async (e) => {
     e.preventDefault();
