@@ -3,6 +3,14 @@
 // ※プロトタイプのため、認証情報はサーバーのメモリ上にのみ保持する（画面・ログには出さない）。
 const { assertPublicUrl } = require('./crawler');
 
+// リンク先として使えるURL（http／https）だけを返す。それ以外（javascript: など）は、使わない。
+function safeHttpUrl(u) {
+  try {
+    const x = new URL(String(u || '').trim());
+    return ['http:', 'https:'].includes(x.protocol) ? x.toString() : '';
+  } catch { return ''; }
+}
+
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 function normalizeSite(input) {
@@ -142,7 +150,16 @@ function blocksToHtml(blocks, imageUrls, { placeholders = false } = {}) {
       case 'table':
         out.push(`<figure class="wp-block-table"><table>${b.caption ? `<caption>${esc(b.caption)}</caption>` : ''}<thead><tr>${(b.headers || []).map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${(b.rows || []).map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></figure>`);
         break;
-      case 'cta': out.push(`<div style="background:#f3f6fb;padding:16px;margin:24px 0;text-align:center;"><p><strong>${esc(b.text)}</strong></p><p>${esc(b.buttonLabel || '')}</p></div>`); break;
+      case 'cta': {
+        // リンク先URLが指定されていれば、ボタンのリンクにする（http／httpsのURLだけを許可する）
+        const url = safeHttpUrl(b.url);
+        const label = esc(b.buttonLabel || '詳しくはこちら');
+        const button = url
+          ? `<a href="${esc(url)}" rel="noopener" style="display:inline-block;background:#1f3a5f;color:#ffffff;padding:10px 28px;border-radius:6px;text-decoration:none;font-weight:bold;">${label}</a>`
+          : label;
+        out.push(`<div style="background:#f3f6fb;padding:16px;margin:24px 0;text-align:center;"><p><strong>${esc(b.text)}</strong></p><p>${button}</p></div>`);
+        break;
+      }
       default: break;
     }
   });

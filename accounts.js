@@ -171,6 +171,19 @@ function cleanMediaInput(body, { partial }) {
   return out;
 }
 
+// 記事のボタン（無料相談など）のリンク先として、メディアごとに登録しておくURL
+const MAX_LINKS = 30;
+
+function cleanLinkInput(body) {
+  const label = String(body?.label ?? '').trim();
+  if (!label) throw new Error('リンクの名前を入力してください（例：無料相談ページ）');
+  if (label.length > 40) throw new Error('リンクの名前は40文字以内で入力してください');
+  let u;
+  try { u = new URL(String(body?.url ?? '').trim()); } catch { throw new Error('URLの形式が正しくありません（https://… の形で入力してください）'); }
+  if (!['http:', 'https:'].includes(u.protocol)) throw new Error('URLは、http:// または https:// で始まるものにしてください');
+  return { label, url: u.toString() };
+}
+
 const mediaList = (user) => (user.media = user.media || []);
 const mediaView = (m) => ({ id: m.id, name: m.name, siteUrl: m.siteUrl, createdAt: m.createdAt, lastUsedAt: m.lastUsedAt || null });
 
@@ -323,6 +336,55 @@ function install(app) {
     if (req.user.integrations) delete req.user.integrations[`wordpress:${m.id}`]; // そのメディアのWordPress接続も消す
     save();
     res.json({ ok: true });
+  });
+
+  // ---- 登録済みメディアのリンク（記事のボタンのリンク先）。ログイン中のアカウントのメディアだけを扱う ----
+  const withMedia = (req, res, next) => {
+    const m = getRegisteredMedia(req.user.id, req.params.id);
+    if (!m) return res.status(404).json({ error: 'メディアが見つかりません' });
+    m.links = m.links || [];
+    req.regMedia = m;
+    next();
+  };
+
+  app.get('/api/registered-media/:id/links', requireEnabled, requireLogin, withMedia, (req, res) => {
+    res.json({ links: req.regMedia.links, defaultLinkId: req.regMedia.defaultLinkId || null });
+  });
+
+  app.post('/api/registered-media/:id/links', requireEnabled, requireLogin, withMedia, (req, res) => {
+    try {
+      const input = cleanLinkInput(req.body);
+      const m = req.regMedia;
+      if (m.links.length >= MAX_LINKS) return res.status(400).json({ error: `登録できるリンクは、${MAX_LINKS}件までです` });
+      const dup = m.links.find((l) => l.url.toLowerCase() === input.url.toLowerCase());
+      if (dup) return res.status(409).json({ error: `このURLは、すでに登録されています（名前：${dup.label}）`, existing: dup });
+      const link = { id: crypto.randomBytes(5).toString('hex'), label: input.label, url: input.url };
+      m.links.push(link);
+      m.defaultLinkId = link.id; // 登録したリンクを、次回の初期値にする
+      save();
+      res.status(201).json({ link, defaultLinkId: m.defaultLinkId });
+    } catch (e) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  // 選んだリンクを、次回の初期値にする
+  app.post('/api/registered-media/:id/links/:linkId/use', requireEnabled, requireLogin, withMedia, (req, res) => {
+    const link = req.regMedia.links.find((l) => l.id === req.params.linkId);
+    if (!link) return res.status(404).json({ error: 'リンクが見つかりません' });
+    req.regMedia.defaultLinkId = link.id;
+    save();
+    res.json({ ok: true });
+  });
+
+  app.delete('/api/registered-media/:id/links/:linkId', requireEnabled, requireLogin, withMedia, (req, res) => {
+    const m = req.regMedia;
+    const link = m.links.find((l) => l.id === req.params.linkId);
+    if (!link) return res.status(404).json({ error: 'リンクが見つかりません' });
+    m.links = m.links.filter((l) => l !== link);
+    if (m.defaultLinkId === link.id) m.defaultLinkId = null;
+    save();
+    res.json({ ok: true, defaultLinkId: m.defaultLinkId });
   });
 
   // ---- 施策のステータス管理（ログイン中のアカウント自身のデータだけを扱う） ----

@@ -39,6 +39,8 @@ const state = {
   authMode: 'login', // 'login' | 'register'
   measuresFilter: 'all',
   registeredMedia: null, // 選んだ（登録した）メディア { id, name, siteUrl }
+  mediaLinks: [], // 登録済みのリンク（記事のボタンのリンク先） { id, label, url }
+  mediaDefaultLinkId: null,
 };
 
 const STEPS = ['テーマ選定', '一次情報', 'AIヒアリング', '記事構成・生成', '装飾・確認', '公開'];
@@ -1677,6 +1679,8 @@ async function renderArticleGenerating() {
     const { article, mode } = await api('/api/article', { body: { sessionId: state.sessionId } });
     state.article = article;
     state.lastMode = mode;
+    await loadMediaLinks(); // 登録済みのリンクを読み込む
+    applyDefaultCtaLink(); // 前回使ったリンクを、ボタンの初期値にする
   } catch (e) {
     toast('記事生成に失敗しました');
   }
@@ -1756,6 +1760,183 @@ async function generateAllImages() {
   if (todo.length && state.screen === 'articleEdit') toast('画像の生成が完了しました');
 }
 
+// ---------------------------------------------------------------
+// 記事のボタン（無料相談など）のリンク先URL：入力して、次回から選べるように登録できる。
+// 登録したリンクは、登録済みのメディアごとに保存される（メディアを登録していない場合は、入力のみ）。
+// ---------------------------------------------------------------
+function safeUrl(u) {
+  try {
+    const x = new URL(String(u || '').trim());
+    return ['http:', 'https:'].includes(x.protocol) ? x.toString() : '';
+  } catch (e) { return ''; }
+}
+
+let ctaDeletingLink = null; // 削除の確認待ちのリンクID
+
+// 登録済みのリンクを読み込み、リンク未設定のボタンには、前回使ったリンクを、初期値として入れる（画面上で変更できる）
+async function loadMediaLinks() {
+  state.mediaLinks = [];
+  state.mediaDefaultLinkId = null;
+  if (!state.registeredMedia) return;
+  try {
+    const data = await api(`/api/registered-media/${state.registeredMedia.id}/links`);
+    state.mediaLinks = data.links || [];
+    state.mediaDefaultLinkId = data.defaultLinkId || null;
+  } catch (e) { /* 取得できなくても、URLの入力はできる */ }
+}
+
+function applyDefaultCtaLink() {
+  const def = (state.mediaLinks || []).find((l) => l.id === state.mediaDefaultLinkId);
+  if (!def || !state.article) return;
+  state.article.blocks.forEach((b) => {
+    if (b.type === 'cta' && !b.url && !b.linkInit) { b.url = def.url; }
+    if (b.type === 'cta') b.linkInit = true;
+  });
+}
+
+function ctaLinkControlsHtml(block, i) {
+  const links = state.mediaLinks || [];
+  const known = links.find((l) => l.url === block.url);
+  const options = [`<option value="" ${block.url ? '' : 'selected'}>リンクなし</option>`]
+    .concat(links.map((l) => `<option value="id:${esc(l.id)}" ${known && known.id === l.id ? 'selected' : ''}>${esc(l.label)}（${esc(l.url)}）</option>`))
+    .concat(block.url && !known ? [`<option value="custom" selected>入力したURL：${esc(block.url)}</option>`] : [])
+    .concat(['<option value="new">URLを入力する…</option>']);
+  const small = 'font-size:12px;color:var(--sub);';
+  const field = 'padding:6px 8px;border:1px solid var(--line);border-radius:6px;font-size:12.5px;font-family:inherit;box-sizing:border-box;';
+  return `<div class="cta-link" data-cta="${i}" style="border:1px dashed var(--line);border-radius:10px;padding:10px 12px;margin:-8px 0 14px;background:#fafbfd;">
+    <div style="${small}font-weight:700;margin-bottom:6px;">ボタンの設定</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px;">
+      <label style="${small}">ボタンの文字</label>
+      <input class="cta-label" type="text" maxlength="30" value="${esc(block.buttonLabel || '')}" style="${field}width:180px;">
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <label style="${small}">リンク先</label>
+      <select class="cta-sel" style="${field}max-width:100%;">${options}</select>
+      ${known && state.registeredMedia ? (ctaDeletingLink === known.id
+        ? `<span style="font-size:12px;color:var(--danger);">登録を削除します。</span><button class="btn danger-outline small cta-del-yes" type="button" data-link="${esc(known.id)}">削除する</button><button class="btn ghost small cta-del-no" type="button">やめる</button>`
+        : `<button class="btn ghost small cta-del" type="button" data-link="${esc(known.id)}">この登録を削除</button>`) : ''}
+    </div>
+    <div class="cta-new" hidden style="margin-top:8px;display:none;gap:6px;flex-wrap:wrap;align-items:center;">
+      <input class="cta-url" type="text" placeholder="https://example.co.jp/contact" style="${field}width:min(420px,100%);">
+      <button class="btn navy small cta-url-ok" type="button">このURLを使う</button>
+    </div>
+    <div class="cta-reg" hidden style="margin-top:8px;display:none;gap:6px;flex-wrap:wrap;align-items:center;">
+      <span style="${small}">このURLを、次回から選べるように<b>登録しますか？</b></span>
+      <input class="cta-reg-name" type="text" maxlength="40" placeholder="名前（例：無料相談ページ）" style="${field}width:200px;">
+      <button class="btn navy small cta-reg-yes" type="button">登録する</button>
+      <button class="btn ghost small cta-reg-no" type="button">登録しない</button>
+    </div>
+    ${state.registeredMedia ? '' : `<div style="${small}margin-top:6px;">※メディアを登録して分析すると、入力したURLを保存して、次回から選べるようになります。</div>`}
+  </div>`;
+}
+
+function showFlex(el, on) {
+  el.hidden = !on;
+  el.style.display = on ? 'flex' : 'none';
+}
+
+// 1つのボタン（相談ボックス）の、リンク設定の操作を結びつける
+function bindCtaControls(i) {
+  const box = app.querySelector(`.cta-link[data-cta="${i}"]`);
+  if (!box) return;
+  const block = state.article.blocks[i];
+  const refresh = () => refreshCtaBlock(i);
+
+  box.querySelector('.cta-label').addEventListener('input', (e) => {
+    block.buttonLabel = e.target.value;
+    const preview = app.querySelector(`[data-block="${i}"] .cta-preview`);
+    if (preview) preview.textContent = block.buttonLabel || '相談する';
+  });
+
+  box.querySelector('.cta-sel').addEventListener('change', async (e) => {
+    const v = e.target.value;
+    showFlex(box.querySelector('.cta-new'), v === 'new');
+    showFlex(box.querySelector('.cta-reg'), false);
+    if (v === 'new') { box.querySelector('.cta-url').focus(); return; }
+    if (v === '') { block.url = ''; refresh(); return; }
+    if (v.startsWith('id:')) {
+      const link = state.mediaLinks.find((l) => l.id === v.slice(3));
+      if (link) {
+        block.url = link.url;
+        state.mediaDefaultLinkId = link.id;
+        if (state.registeredMedia) fetch(`/api/registered-media/${state.registeredMedia.id}/links/${link.id}/use`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => {});
+      }
+      refresh();
+    }
+  });
+
+  box.querySelector('.cta-url-ok').addEventListener('click', () => {
+    const url = safeUrl(box.querySelector('.cta-url').value);
+    if (!url) { toast('URLの形式が正しくありません（https://… の形で入力してください）'); return; }
+    block.url = url;
+    const already = (state.mediaLinks || []).find((l) => l.url.toLowerCase() === url.toLowerCase());
+    if (state.registeredMedia && !already) {
+      // 登録するかどうかを聞く
+      showFlex(box.querySelector('.cta-new'), false);
+      const nameInput = box.querySelector('.cta-reg-name');
+      showFlex(box.querySelector('.cta-reg'), true);
+      nameInput.value = box.querySelector('.cta-label').value || '';
+      nameInput.focus();
+    } else {
+      refresh();
+    }
+  });
+
+  box.querySelector('.cta-reg-no').addEventListener('click', refresh);
+  box.querySelector('.cta-reg-yes').addEventListener('click', async () => {
+    const label = box.querySelector('.cta-reg-name').value.trim();
+    if (!label) { toast('名前を入力してください（例：無料相談ページ）'); return; }
+    try {
+      const res = await fetch(`/api/registered-media/${state.registeredMedia.id}/links`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ label, url: block.url }) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok && !(res.status === 409 && data.existing)) { toast(data.error || '登録できませんでした'); return; }
+      const link = res.ok ? data.link : data.existing;
+      if (res.ok) state.mediaLinks.push(link);
+      state.mediaDefaultLinkId = link.id;
+      toast(res.ok ? 'リンクを登録しました。次回から、選べます' : 'すでに登録されているリンクです');
+      refresh();
+    } catch (e) { if (!e.authExpired) toast('登録できませんでした'); }
+  });
+
+  const del = box.querySelector('.cta-del');
+  if (del) del.addEventListener('click', () => { ctaDeletingLink = del.dataset.link; refresh(); });
+  const delNo = box.querySelector('.cta-del-no');
+  if (delNo) delNo.addEventListener('click', () => { ctaDeletingLink = null; refresh(); });
+  const delYes = box.querySelector('.cta-del-yes');
+  if (delYes) delYes.addEventListener('click', async () => {
+    const id = delYes.dataset.link;
+    try {
+      const res = await fetch(`/api/registered-media/${state.registeredMedia.id}/links/${id}`, { method: 'DELETE' });
+      if (!res.ok) { toast('削除できませんでした'); return; }
+      state.mediaLinks = state.mediaLinks.filter((l) => l.id !== id);
+      if (state.mediaDefaultLinkId === id) state.mediaDefaultLinkId = null;
+      ctaDeletingLink = null;
+      toast('登録を削除しました（記事に入っているURLは、そのまま残ります）');
+      state.article.blocks.forEach((b, idx) => { if (b.type === 'cta') refreshCtaBlock(idx); });
+    } catch (e) { if (!e.authExpired) toast('削除できませんでした'); }
+  });
+}
+
+// 相談ボックスを、その場で描き直す（他のブロックの編集内容は、そのまま）
+function refreshCtaBlock(i) {
+  const wrap = app.querySelector(`[data-block="${i}"]`);
+  if (!wrap) return;
+  wrap.outerHTML = blockToEditableHtml(state.article.blocks[i], i);
+  const fresh = app.querySelector(`[data-block="${i}"]`);
+  bindEditables(fresh);
+  bindCtaControls(i);
+}
+
+function bindEditables(root) {
+  root.querySelectorAll('.editable').forEach((elm) => {
+    elm.addEventListener('blur', () => {
+      const idx = Number(elm.closest('[data-block]').dataset.block);
+      const field = elm.dataset.field;
+      if (field) state.article.blocks[idx][field] = elm.textContent;
+    });
+  });
+}
+
 function blockToEditableHtml(block, i) {
   const tools = `<div class="block-toolbar">
       ${['paragraph', 'list', 'quote'].includes(block.type) ? `<button data-regen="${i}">↻ 再生成</button>` : ''}
@@ -1779,7 +1960,7 @@ function blockToEditableHtml(block, i) {
         <thead><tr>${(block.headers || []).map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead>
         <tbody>${(block.rows || []).map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
       break;
-    case 'cta': inner = `<div class="art-cta"><div class="t editable" contenteditable="true" data-field="text">${esc(block.text)}</div><button type="button">${esc(block.buttonLabel || '相談する')}</button></div>`; break;
+    case 'cta': inner = `<div class="art-cta"><div class="t editable" contenteditable="true" data-field="text">${esc(block.text)}</div><button type="button" class="cta-preview">${esc(block.buttonLabel || '相談する')}</button>${safeUrl(block.url) ? `<div style="font-size:11px;opacity:.85;margin-top:6px;word-break:break-all;">リンク先：${esc(block.url)}</div>` : ''}</div>${ctaLinkControlsHtml(block, i)}`; break;
     default: inner = `<div>${esc(JSON.stringify(block))}</div>`;
   }
   return `<div class="block-wrap" data-block="${i}">${tools}${inner}</div>`;
@@ -1814,13 +1995,8 @@ function renderArticleEdit() {
     </div>
   `);
 
-  app.querySelectorAll('.editable').forEach((elm) => {
-    elm.addEventListener('blur', () => {
-      const idx = Number(elm.closest('[data-block]').dataset.block);
-      const field = elm.dataset.field;
-      if (field) state.article.blocks[idx][field] = elm.textContent;
-    });
-  });
+  bindEditables(app);
+  state.article.blocks.forEach((b, i) => { if (b.type === 'cta') bindCtaControls(i); });
   app.querySelectorAll('[data-regen]').forEach((btn) => btn.addEventListener('click', () => regenerateBlock(Number(btn.dataset.regen))));
   state.article.blocks.forEach((b, i) => { if (b.type === 'image') bindImageButton(i); });
   const genAll = document.getElementById('gen-all-images');
@@ -2069,7 +2245,11 @@ function blockToReaderHtml(block) {
     case 'quote': return `<div class="art-quote">${esc(block.text)}<cite>${esc(block.cite || '')}</cite></div>`;
     case 'callout': return `<div class="art-callout">💡 ${esc(block.text)}</div>`;
     case 'table': return `<table class="art-table">${block.caption ? `<caption>${esc(block.caption)}</caption>` : ''}<thead><tr>${(block.headers || []).map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${(block.rows || []).map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
-    case 'cta': return `<div class="art-cta"><div class="t">${esc(block.text)}</div><button type="button">${esc(block.buttonLabel || '相談する')}</button></div>`;
+    case 'cta': {
+      const url = safeUrl(block.url);
+      const label = esc(block.buttonLabel || '相談する');
+      return `<div class="art-cta"><div class="t">${esc(block.text)}</div>${url ? `<a class="cta-btn" href="${esc(url)}" target="_blank" rel="noopener">${label}</a>` : `<button type="button">${label}</button>`}</div>`;
+    }
     default: return '';
   }
 }
