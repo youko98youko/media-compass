@@ -213,7 +213,7 @@ function shell(innerHtml, { active = true } = {}) {
   // 上部メニューは、どの画面でも同じ並びで出す（ステータスによって、メニューが変わらないようにする）
   const navHtml = `
       <div class="nav">
-        <span class="${state.screen === 'dashboard' ? 'on' : ''}" data-nav="dashboard">ホーム</span>
+        <span class="${['mediaState', 'mediaChoice'].includes(state.screen) ? 'on' : ''}" data-nav="dashboard">ホーム</span>
         <span class="${state.screen === 'direction' ? 'on' : ''}" data-nav="direction">メディアの方向性</span>
         ${state.accountsEnabled ? `<span class="${['measures', 'auth'].includes(state.screen) ? 'on' : ''}" data-nav="measures">施策管理</span>` : ''}
         <span class="${['articles', 'articlesPick', 'rewriteResult'].includes(state.screen) ? 'on' : ''}" data-nav="monitoring">記事一覧・監視</span>
@@ -236,7 +236,7 @@ function shell(innerHtml, { active = true } = {}) {
   }));
   app.querySelectorAll('[data-nav]').forEach((elm) => {
     elm.addEventListener('click', () => {
-      if (elm.dataset.nav === 'dashboard') renderDashboard();
+      if (elm.dataset.nav === 'dashboard') renderMediaState(); // ホーム＝最初の画面（メディア状態の選択）
       if (elm.dataset.nav === 'monitoring') (state.accountsEnabled && state.user ? renderArticles() : renderMonitoring()); // ローカル版は、投稿済み記事の一覧とリライト
       if (elm.dataset.nav === 'direction') renderDirectionSummary();
       if (elm.dataset.nav === 'settings') renderSettings();
