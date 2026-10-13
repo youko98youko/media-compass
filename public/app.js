@@ -38,6 +38,7 @@ const state = {
   user: null, // ログイン中のアカウント { id, username }
   authMode: 'login', // 'login' | 'register'
   measuresFilter: 'all',
+  registeredMedia: null, // 選んだ（登録した）メディア { id, name, siteUrl }
 };
 
 const STEPS = ['テーマ選定', '一次情報', 'AIヒアリング', '記事構成・生成', '装飾・確認', '公開'];
@@ -270,7 +271,224 @@ function renderMediaState() {
   pushHistory();
 }
 
+// ---------------------------------------------------------------
+// 既存メディアを分析する：「新たにメディアを登録」／「登録済みのメディア」の2択
+// 登録したメディア（名前とサイトURL）は、ログインしているアカウントごとに保存される。
+// ---------------------------------------------------------------
+let registeredMediaCache = [];
+let mediaEditingId = null;
+let mediaDeletingId = null;
+
+async function mediaApi(method, path, body) {
+  const res = await fetch(path, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const e = new Error(data.error || '処理に失敗しました');
+    e.data = data;
+    throw e;
+  }
+  return data;
+}
+
+const fieldStyle = 'width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;box-sizing:border-box;';
+
+// 2択の画面
+async function renderMediaChoice() {
+  state.screen = 'mediaChoice';
+  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>読み込み中…</div></div>`, { active: false, nav: false });
+  try {
+    ({ media: registeredMediaCache } = await mediaApi('GET', '/api/registered-media'));
+  } catch (e) {
+    if (!e.authExpired) showFatalError(e);
+    return;
+  }
+  const n = registeredMediaCache.length;
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">STEP 0-1 ・ 既存メディアの分析</div>
+        <h1>どのメディアを分析しますか？</h1>
+        <p>分析するメディア（Webサイト）を、新しく登録するか、登録済みのものから選びます。登録したメディアは、あなたのアカウントに保存されます。</p>
+      </div>
+      <div class="card clickable" id="choice-new">
+        <h3>新たにメディアを登録</h3>
+        <div style="font-size:12.5px;color:var(--sub);">メディア名とサイトURLを登録して、分析を始めます。</div>
+      </div>
+      <div class="card ${n ? 'clickable' : ''}" id="choice-registered" ${n ? '' : 'style="opacity:.6;cursor:not-allowed;"'}>
+        <h3>登録済みのメディア <span class="pill ${n ? 'ok' : 'grey'}">${n}件</span></h3>
+        <div style="font-size:12.5px;color:var(--sub);">${n ? '登録済みのメディアから選んで、分析を始めます。' : 'まだ登録されたメディアがありません。先に、「新たにメディアを登録」から登録してください。'}</div>
+      </div>
+      <div class="btn-row"><button class="btn ghost" id="choice-back">← 戻る</button></div>
+    </div>
+  `, { active: false });
+  document.getElementById('choice-new').addEventListener('click', renderMediaRegister);
+  document.getElementById('choice-registered').addEventListener('click', () => { if (n) renderMediaList(); else toast('登録済みのメディアはありません'); });
+  document.getElementById('choice-back').addEventListener('click', renderMediaState);
+  pushHistory();
+}
+
+// 新たにメディアを登録する画面
+function renderMediaRegister() {
+  state.screen = 'mediaRegister';
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">STEP 0-1 ・ 既存メディアの分析</div>
+        <h1>新たにメディアを登録</h1>
+        <p>分析するメディアの名前と、サイトのURLを登録します。登録後、そのまま分析に進めます。</p>
+      </div>
+      <div class="card">
+        <div class="field-grid">
+          <div class="k">メディア名</div><div class="v"><input id="reg-name" type="text" maxlength="60" placeholder="例：DCCがお届けする最新SEOデイリーニュース" style="${fieldStyle}"></div>
+          <div class="k">サイトURL</div><div class="v"><input id="reg-url" type="text" placeholder="https://example.co.jp/" style="${fieldStyle}"></div>
+        </div>
+        <div style="font-size:11px;color:var(--sub);margin:6px 0 4px;">サイトのトップページのURLを入れます。サブディレクトリで運用しているメディアは、そのディレクトリのURL（例：https://example.co.jp/media/）を入れてください。</div>
+        <div id="reg-error" style="color:var(--danger);font-size:12.5px;margin:6px 0;"></div>
+        <div class="btn-row">
+          <button class="btn navy" id="reg-submit">登録して分析へ進む →</button>
+          <button class="btn ghost" id="reg-back">← 戻る</button>
+        </div>
+      </div>
+    </div>
+  `, { active: false });
+  document.getElementById('reg-submit').addEventListener('click', async () => {
+    const errEl = document.getElementById('reg-error');
+    const btn = document.getElementById('reg-submit');
+    errEl.textContent = '';
+    btn.disabled = true;
+    try {
+      const { media } = await mediaApi('POST', '/api/registered-media', { name: document.getElementById('reg-name').value, siteUrl: document.getElementById('reg-url').value });
+      await startWithRegistered(media);
+    } catch (e) {
+      if (e.authExpired) return;
+      errEl.textContent = e.message;
+      // すでに登録済みのURLなら、そのメディアで分析を始められるようにする
+      if (e.data && e.data.existing) {
+        errEl.innerHTML = `${esc(e.message)}　<a href="#" id="reg-use-existing">登録済みのこのメディアで分析する</a>`;
+        document.getElementById('reg-use-existing').addEventListener('click', (ev) => { ev.preventDefault(); startWithRegistered(e.data.existing); });
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  document.getElementById('reg-back').addEventListener('click', renderMediaChoice);
+  pushHistory();
+}
+
+// 登録済みのメディアの一覧（選ぶ・編集・削除）
+async function renderMediaList() {
+  state.screen = 'mediaList';
+  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>読み込み中…</div></div>`, { active: false });
+  try {
+    ({ media: registeredMediaCache } = await mediaApi('GET', '/api/registered-media'));
+  } catch (e) {
+    if (!e.authExpired) showFatalError(e);
+    return;
+  }
+  mediaEditingId = null;
+  mediaDeletingId = null;
+  drawMediaList();
+  pushHistory();
+}
+
+function drawMediaList() {
+  const fmt = (iso) => (iso ? new Date(iso).toLocaleDateString('ja-JP') : '未使用');
+  const items = registeredMediaCache.map((m) => {
+    if (m.id === mediaEditingId) {
+      return `<div class="card" data-id="${m.id}">
+        <div class="field-grid">
+          <div class="k">メディア名</div><div class="v"><input class="m-edit-name" type="text" maxlength="60" value="${esc(m.name)}" style="${fieldStyle}"></div>
+          <div class="k">サイトURL</div><div class="v"><input class="m-edit-url" type="text" value="${esc(m.siteUrl)}" style="${fieldStyle}"></div>
+        </div>
+        <div class="m-edit-error" style="color:var(--danger);font-size:12.5px;margin:6px 0;"></div>
+        <div class="btn-row"><button class="btn navy small" data-act="save">保存</button><button class="btn ghost small" data-act="cancel">キャンセル</button></div>
+      </div>`;
+    }
+    return `<div class="card" data-id="${m.id}">
+      <h3>${esc(m.name)}</h3>
+      <div style="font-size:12.5px;color:var(--sub);word-break:break-all;">${esc(m.siteUrl)}</div>
+      <div style="font-size:11px;color:var(--sub);margin-top:2px;">登録：${esc(fmt(m.createdAt))} ／ 最後に使った日：${esc(fmt(m.lastUsedAt))}</div>
+      <div class="btn-row">
+        <button class="btn navy small" data-act="use">このメディアを分析する →</button>
+        ${m.id === mediaDeletingId
+          ? '<span style="font-size:12.5px;color:var(--danger);align-self:center;">このメディアの登録を削除します（WordPressの接続情報も消えます）。</span><button class="btn danger-outline small" data-act="delete-yes">削除する</button><button class="btn ghost small" data-act="delete-no">やめる</button>'
+          : '<button class="btn ghost small" data-act="edit">編集</button><button class="btn ghost small" data-act="delete">削除</button>'}
+      </div>
+    </div>`;
+  }).join('');
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">STEP 0-1 ・ 既存メディアの分析</div>
+        <h1>登録済みのメディア</h1>
+        <p>分析するメディアを選んでください（${registeredMediaCache.length}件）。最後に使ったものが、上に並びます。</p>
+      </div>
+      ${items || '<div class="card" style="color:var(--sub);font-size:13px;">登録されたメディアがありません。</div>'}
+      <div class="btn-row">
+        <button class="btn outline" id="list-new">新たにメディアを登録</button>
+        <button class="btn ghost" id="list-back">← 戻る</button>
+      </div>
+    </div>
+  `, { active: false });
+  document.getElementById('list-new').addEventListener('click', renderMediaRegister);
+  document.getElementById('list-back').addEventListener('click', renderMediaChoice);
+  app.querySelectorAll('[data-id]').forEach((card) => {
+    const id = card.dataset.id;
+    const item = registeredMediaCache.find((m) => m.id === id);
+    card.querySelectorAll('[data-act]').forEach((el) => el.addEventListener('click', async () => {
+      const act = el.dataset.act;
+      if (act === 'use') startWithRegistered(item);
+      else if (act === 'edit') { mediaEditingId = id; drawMediaList(); }
+      else if (act === 'cancel') { mediaEditingId = null; drawMediaList(); }
+      else if (act === 'delete') { mediaDeletingId = id; drawMediaList(); }
+      else if (act === 'delete-no') { mediaDeletingId = null; drawMediaList(); }
+      else if (act === 'delete-yes') {
+        try {
+          await mediaApi('DELETE', `/api/registered-media/${id}`);
+          registeredMediaCache = registeredMediaCache.filter((m) => m.id !== id);
+          mediaDeletingId = null;
+          toast('メディアの登録を削除しました');
+          if (!registeredMediaCache.length) renderMediaChoice();
+          else drawMediaList();
+        } catch (e) { if (!e.authExpired) toast(e.message); }
+      } else if (act === 'save') {
+        try {
+          const { media } = await mediaApi('PUT', `/api/registered-media/${id}`, { name: card.querySelector('.m-edit-name').value, siteUrl: card.querySelector('.m-edit-url').value });
+          registeredMediaCache = registeredMediaCache.map((m) => (m.id === id ? media : m));
+          mediaEditingId = null;
+          drawMediaList();
+          toast('変更を保存しました');
+        } catch (e) { if (!e.authExpired) card.querySelector('.m-edit-error').textContent = e.message; }
+      }
+    }));
+  });
+}
+
+// 登録済みのメディアで、分析を始める
+async function startWithRegistered(media) {
+  let data;
+  try {
+    data = await api('/api/media/state', { body: { mediaState: 'existing', registeredId: media.id } });
+  } catch (e) {
+    if (!e.authExpired) showFatalError(e);
+    return;
+  }
+  state.mediaId = data.mediaId;
+  state.mediaState = 'existing';
+  state.registeredMedia = { id: media.id, name: media.name, siteUrl: media.siteUrl };
+  state.siteUrlInput = media.siteUrl;
+  state.gscConnected = false;
+  state.gscDemo = false;
+  renderExistingUnderstand();
+}
+
 async function pickMediaState(mediaState) {
+  // アカウント機能が有効なときは、既存メディアの分析は、「新たにメディアを登録」「登録済みのメディア」の2択から始める
+  if (mediaState === 'existing' && state.accountsEnabled && state.user) {
+    state.registeredMedia = null;
+    renderMediaChoice();
+    return;
+  }
   let mediaId;
   try {
     ({ mediaId } = await api('/api/media/state', { body: { mediaState } }));
@@ -281,6 +499,7 @@ async function pickMediaState(mediaState) {
   state.mediaId = mediaId;
   state.mediaState = mediaState;
   state.siteUrlInput = '';
+  state.registeredMedia = null;
   state.gscConnected = false;
   if (mediaState === 'existing') renderExistingUnderstand();
   else renderNewBusinessForm();
@@ -291,18 +510,20 @@ async function pickMediaState(mediaState) {
 // ---------------------------------------------------------------
 function renderExistingUnderstand() {
   state.screen = 'understandExistingForm';
+  const reg = state.registeredMedia;
   shell(`
     <div class="wrap">
       <div class="screen-head">
         <div class="eyebrow">STEP 0-2 ・ メディア理解（既存）</div>
         <h1>既存メディアを分析する</h1>
-        <p>サイトURLをもとに、現状の記事・検索順位・カバレッジ状況を分析します（3.2）。</p>
+        <p>${reg ? `対象メディア：<b>${esc(reg.name)}</b>。` : ''}サイトURLをもとに、現状の記事・検索順位・カバレッジ状況を分析します（3.2）。</p>
       </div>
       <div class="card">
         <div class="field-grid">
-          <div class="k">サイトURL</div><div class="v"><input id="site-url" type="text" placeholder="https://example.co.jp" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;"></div>
+          <div class="k">サイトURL</div><div class="v"><input id="site-url" type="text" ${reg ? `value="${esc(reg.siteUrl)}" readonly` : ''} placeholder="https://example.co.jp" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;"></div>
         </div>
         <div style="font-size:11px;color:var(--sub);margin:6px 0 12px;">未定：既存記事一覧の取得手段（GSC連携／簡易クロール／手動アップロード／CMS連携のいずれを主手段とするか）</div>
+        ${reg ? '<div style="font-size:11.5px;margin:0 0 8px;"><a href="#" id="reselect-media">メディアを選び直す／登録内容を変える</a></div>' : ''}
         <div class="btn-row">
           <button class="btn navy" id="go-analyze-gsc">GSCと連携して分析する →</button>
           <button class="btn outline" id="go-analyze-nogsc">GSCと連携しないで分析する →</button>
@@ -310,6 +531,8 @@ function renderExistingUnderstand() {
       </div>
     </div>
   `, { active: false, nav: false });
+  const reselect = document.getElementById('reselect-media');
+  if (reselect) reselect.addEventListener('click', (e) => { e.preventDefault(); renderMediaChoice(); });
   document.getElementById('go-analyze-gsc').addEventListener('click', async () => {
     state.siteUrlInput = (document.getElementById('site-url').value || '').trim() || 'https://example.co.jp';
     state.gscContext = 'analyze';
@@ -2238,6 +2461,9 @@ const SCREEN_RENDERERS = {
   published: renderPublishedStatus,
   publishError: () => renderPublishError(state.publishErrorMessage || ''),
   export: renderExport,
+  mediaChoice: renderMediaChoice,
+  mediaRegister: renderMediaRegister,
+  mediaList: renderMediaList,
   workLost: renderWorkLost,
   mediaPage: () => renderMediaPage(state.publishInfo && state.publishInfo.articleId),
   monitoring: renderMonitoring,

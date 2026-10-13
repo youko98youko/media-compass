@@ -241,15 +241,24 @@ function getMediaProfile(req, res) {
 
 // STEP 0-1: メディア状態判定（3.1）
 app.post('/api/media/state', (req, res) => {
-  const { mediaState } = req.body || {};
+  const { mediaState, registeredId } = req.body || {};
   if (!['existing', 'new'].includes(mediaState)) return res.status(400).json({ error: 'invalid mediaState' });
+
+  // 登録済みのメディアを選んだ場合：そのメディアのサイトURLで分析を始める（他のアカウントのものは使えない）
+  let reg = null;
+  if (registeredId) {
+    reg = req.user ? accounts.getRegisteredMedia(req.user.id, String(registeredId)) : null;
+    if (!reg) return res.status(404).json({ error: '登録済みのメディアが見つかりません' });
+    accounts.updateRegisteredMedia(req.user.id, reg.id, { lastUsedAt: new Date().toISOString() });
+  }
 
   const mediaId = newId('media');
   mediaProfiles.set(mediaId, {
     id: mediaId,
     userId: req.user?.id || null, // アカウント機能が有効なときは、作成したアカウントのものになる
+    regId: reg ? reg.id : null, // 登録済みメディアのID（WordPressの接続先・GSCのサイト選択を、メディアごとに覚えるため）
     mediaState,
-    siteUrl: null,
+    siteUrl: reg ? reg.siteUrl : null,
     businessInfo: null,
     wordpress: null,
     hearing: { history: [], lastQuestion: null, done: false, maxQuestions: 4 },
@@ -257,7 +266,7 @@ app.post('/api/media/state', (req, res) => {
     topicClusters: null,
     directionConfirmed: false,
   });
-  res.json({ mediaId });
+  res.json({ mediaId, registered: reg ? { id: reg.id, name: reg.name, siteUrl: reg.siteUrl } : null });
 });
 
 // STEP 0-2a: 既存メディア理解（3.2）
@@ -289,6 +298,13 @@ function loadGsc(req, m) {
   return m.gsc || null;
 }
 
+// 登録済みメディアでは、GSCで選んだサイトを、そのメディアごとに覚える（アカウントのGSC連携自体は共通）
+function applyRegisteredSite(req, m) {
+  if (m?.gsc && m.regId && req.user) {
+    m.gsc.siteUrl = accounts.getRegisteredMedia(req.user.id, m.regId)?.gscSiteUrl || null;
+  }
+}
+
 function saveGsc(req, m) {
   if (req.user && m.gsc) {
     accounts.setIntegration(req.user.id, 'gsc', { cfg: m.gsc.cfg, tokens: m.gsc.tokens, email: m.gsc.email, siteUrl: m.gsc.siteUrl, connectedAt: m.gsc.connectedAt });
@@ -299,6 +315,7 @@ function saveGsc(req, m) {
 app.post('/api/gsc/status', (req, res) => {
   const m = ownedMedia(req, req.body?.mediaId);
   loadGsc(req, m);
+  applyRegisteredSite(req, m);
   res.json(m?.gsc ? { connected: true, account: m.gsc.email, siteUrl: m.gsc.siteUrl, connectedAt: m.gsc.connectedAt } : { connected: false });
 });
 
@@ -341,6 +358,7 @@ app.post('/api/gsc/sites', async (req, res) => {
   const m = getMediaProfile(req, res);
   if (!m) return;
   loadGsc(req, m);
+  applyRegisteredSite(req, m);
   if (!m.gsc) return res.status(400).json({ error: 'GSC未連携です' });
   try {
     const sites = gsc.rankSites(await gsc.listSites(m.gsc), req.body.siteUrl || m.siteUrl || '');
@@ -356,6 +374,7 @@ app.post('/api/gsc/select-site', (req, res) => {
   loadGsc(req, m);
   if (!m.gsc) return res.status(400).json({ error: 'GSC未連携です' });
   m.gsc.siteUrl = String(req.body.siteUrl || '');
+  if (m.regId && req.user) accounts.updateRegisteredMedia(req.user.id, m.regId, { gscSiteUrl: m.gsc.siteUrl });
   saveGsc(req, m);
   res.json({ ok: true });
 });
@@ -394,6 +413,7 @@ app.post('/api/media/understand-existing', async (req, res) => {
   let gscSummary = null;
   let gscError = null;
   loadGsc(req, m);
+  applyRegisteredSite(req, m);
   if (withGsc && m.gsc?.siteUrl) {
     try { gscSummary = await gsc.fetchSummary(m.gsc); } catch (e) { gscError = e.message; console.warn('[GSCデータ取得失敗]', e.message); }
   }
@@ -450,10 +470,20 @@ app.post('/api/media/wordpress-connect', (req, res) => {
 });
 
 // アカウントに保存されている「接続済みのWordPress」を、このメディアで使えるようにする（GSCと同じ仕組み）。
+// WordPressの接続は、登録済みメディアごとに保存する（メディアごとに、投稿先のサイトが違うため）。
+// 登録済みメディアを使わない場合は、アカウントに1つだけ保存する。
+const wpKey = (m) => (m.regId ? `wordpress:${m.regId}` : 'wordpress');
+const sameHost = (a, b) => { try { return new URL(a).hostname.replace(/^www\./, '') === new URL(b).hostname.replace(/^www\./, ''); } catch { return false; } };
+
 function loadWp(req, m) {
   if (!m) return null;
   if (!m.wordpress?.real && req.user) {
-    const saved = accounts.getIntegration(req.user.id, 'wordpress');
+    let saved = accounts.getIntegration(req.user.id, wpKey(m));
+    if (!saved && m.regId && m.siteUrl) {
+      // 以前、メディアを登録する前に接続していたWordPressが、このメディアのサイトと同じなら、引き継ぐ
+      const legacy = accounts.getIntegration(req.user.id, 'wordpress');
+      if (legacy && sameHost(legacy.siteUrl, m.siteUrl)) saved = legacy;
+    }
     if (saved) m.wordpress = { connected: true, real: true, ...saved };
   }
   return m.wordpress || null;
@@ -462,7 +492,7 @@ function loadWp(req, m) {
 function saveWp(req, m) {
   const w = m.wordpress;
   if (req.user && w?.real) {
-    accounts.setIntegration(req.user.id, 'wordpress', { method: w.method, siteUrl: w.siteUrl, siteName: w.siteName, userName: w.userName, canUpload: w.canUpload, isAdmin: w.isAdmin, cfg: w.cfg });
+    accounts.setIntegration(req.user.id, wpKey(m), { method: w.method, siteUrl: w.siteUrl, siteName: w.siteName, userName: w.userName, canUpload: w.canUpload, isAdmin: w.isAdmin, cfg: w.cfg });
   }
 }
 
@@ -492,8 +522,12 @@ app.post('/api/wordpress/status', (req, res) => {
 app.post('/api/wordpress/disconnect', (req, res) => {
   const m = getMediaProfile(req, res);
   if (!m) return;
+  const legacy = req.user && m.regId && m.siteUrl ? accounts.getIntegration(req.user.id, 'wordpress') : null;
   m.wordpress = null;
-  if (req.user) accounts.setIntegration(req.user.id, 'wordpress', null);
+  if (req.user) {
+    accounts.setIntegration(req.user.id, wpKey(m), null);
+    if (legacy && sameHost(legacy.siteUrl, m.siteUrl)) accounts.setIntegration(req.user.id, 'wordpress', null); // 引き継ぎ元も消す（消さないと、また復活する）
+  }
   res.json({ ok: true });
 });
 

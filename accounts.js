@@ -143,6 +143,50 @@ function startSession(res, user) {
 
 const publicUser = (u) => ({ id: u.id, username: u.username });
 
+// ---- 登録済みメディア（分析対象のWebサイト）：アカウントごとに保存する ----
+const MAX_MEDIA = 50;
+
+function normalizeMediaUrl(input) {
+  let t = String(input || '').trim();
+  if (!t) throw new Error('サイトURLを入力してください');
+  if (!/^https?:\/\//i.test(t)) t = `https://${t}`;
+  let u;
+  try { u = new URL(t); } catch { throw new Error('サイトURLの形式が正しくありません'); }
+  if (!/\./.test(u.hostname)) throw new Error('サイトURLの形式が正しくありません');
+  u.hash = '';
+  u.search = '';
+  u.pathname = u.pathname.replace(/\/+$/, '') || '/'; // 末尾の「/」の有無で、別のURLにならないよう、そろえる（トップページ以外）
+  return u.toString();
+}
+
+function cleanMediaInput(body, { partial }) {
+  const out = {};
+  if (!partial || body.name !== undefined) {
+    const name = String(body.name ?? '').trim();
+    if (!name) throw new Error('メディア名を入力してください');
+    if (name.length > 60) throw new Error('メディア名は60文字以内で入力してください');
+    out.name = name;
+  }
+  if (!partial || body.siteUrl !== undefined) out.siteUrl = normalizeMediaUrl(body.siteUrl);
+  return out;
+}
+
+const mediaList = (user) => (user.media = user.media || []);
+const mediaView = (m) => ({ id: m.id, name: m.name, siteUrl: m.siteUrl, createdAt: m.createdAt, lastUsedAt: m.lastUsedAt || null });
+
+function getRegisteredMedia(userId, id) {
+  const user = db.users.find((u) => u.id === userId);
+  return user ? mediaList(user).find((m) => m.id === id) || null : null;
+}
+
+function updateRegisteredMedia(userId, id, patch) {
+  const m = getRegisteredMedia(userId, id);
+  if (!m) return null;
+  Object.assign(m, patch);
+  save();
+  return m;
+}
+
 // ---- 入力の検証 ----
 const USERNAME_RE = /^[A-Za-z0-9_.@+-]{3,50}$/;
 
@@ -232,6 +276,55 @@ function install(app) {
     res.status(401).json({ error: 'login_required' });
   });
 
+  // ---- 登録済みメディア（ログイン中のアカウント自身のものだけを扱う） ----
+  app.get('/api/registered-media', requireEnabled, requireLogin, (req, res) => {
+    const list = [...mediaList(req.user)].sort((a, b) => (b.lastUsedAt || b.createdAt).localeCompare(a.lastUsedAt || a.createdAt));
+    res.json({ media: list.map(mediaView) });
+  });
+
+  app.post('/api/registered-media', requireEnabled, requireLogin, (req, res) => {
+    try {
+      const input = cleanMediaInput(req.body || {}, { partial: false });
+      const list = mediaList(req.user);
+      if (list.length >= MAX_MEDIA) return res.status(400).json({ error: `登録できるメディアは、${MAX_MEDIA}件までです` });
+      const dup = list.find((m) => m.siteUrl.toLowerCase() === input.siteUrl.toLowerCase());
+      if (dup) return res.status(409).json({ error: `このサイトURLは、すでに登録されています（メディア名：${dup.name}）`, existing: mediaView(dup) });
+      const m = { id: crypto.randomBytes(6).toString('hex'), name: input.name, siteUrl: input.siteUrl, createdAt: new Date().toISOString(), lastUsedAt: null, gscSiteUrl: null };
+      list.push(m);
+      save();
+      res.status(201).json({ media: mediaView(m) });
+    } catch (e) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.put('/api/registered-media/:id', requireEnabled, requireLogin, (req, res) => {
+    const m = getRegisteredMedia(req.user.id, req.params.id);
+    if (!m) return res.status(404).json({ error: 'メディアが見つかりません' });
+    try {
+      const input = cleanMediaInput(req.body || {}, { partial: true });
+      if (input.siteUrl && mediaList(req.user).some((x) => x !== m && x.siteUrl.toLowerCase() === input.siteUrl.toLowerCase())) {
+        return res.status(409).json({ error: 'このサイトURLは、すでに別のメディアとして登録されています' });
+      }
+      if (input.siteUrl && input.siteUrl !== m.siteUrl) m.gscSiteUrl = null; // サイトが変わったら、GSCのサイト選択はやり直す
+      Object.assign(m, input);
+      save();
+      res.json({ media: mediaView(m) });
+    } catch (e) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.delete('/api/registered-media/:id', requireEnabled, requireLogin, (req, res) => {
+    const list = mediaList(req.user);
+    const m = list.find((x) => x.id === req.params.id);
+    if (!m) return res.status(404).json({ error: 'メディアが見つかりません' });
+    req.user.media = list.filter((x) => x !== m);
+    if (req.user.integrations) delete req.user.integrations[`wordpress:${m.id}`]; // そのメディアのWordPress接続も消す
+    save();
+    res.json({ ok: true });
+  });
+
   // ---- 施策のステータス管理（ログイン中のアカウント自身のデータだけを扱う） ----
   const mine = (user) => db.measures.filter((m) => m.userId === user.id);
   const view = ({ userId, ...m }) => m;
@@ -276,4 +369,4 @@ function install(app) {
   });
 }
 
-module.exports = { install, STATUSES, ENABLED, setIntegration, getIntegration };
+module.exports = { install, STATUSES, ENABLED, setIntegration, getIntegration, getRegisteredMedia, updateRegisteredMedia };
