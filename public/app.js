@@ -165,10 +165,16 @@ function esc(s) {
 // popstateで戻ってきたら、そのstateを復元して同じ画面を再描画する（サーバーへの再取得は行わない）。
 // ---------------------------------------------------------------
 let isRestoringHistory = false;
+let replaceNextHistory = false; // ページの更新で画面を復元したとき、最初の1回は、履歴を増やさず上書きする
 
 function pushHistory() {
   if (isRestoringHistory) return;
   const snapshot = JSON.parse(JSON.stringify(state));
+  if (replaceNextHistory) {
+    replaceNextHistory = false;
+    history.replaceState({ screen: state.screen, snapshot }, '', location.href);
+    return;
+  }
   history.pushState({ screen: state.screen, snapshot }, '', location.href);
 }
 
@@ -3034,5 +3040,23 @@ window.addEventListener('popstate', (e) => {
     state.user = me.user;
   } catch (e) { /* サーバー未接続でも最初の画面は表示する */ }
   if (state.accountsEnabled && !state.user) renderAuth(); // アカウント機能が有効なときは、ログイン（アカウント作成）が必須
-  else if (!handleGscReturn()) renderMediaState();
+  else if (!handleGscReturn() && !restoreAfterReload()) renderMediaState();
 })();
+
+// ページを更新（再読み込み）したときは、最初の画面に戻さず、今の画面のまま、最新の状態を表示する。
+// 履歴に残っている画面と入力内容を戻し、一覧や設定などは、画面を描き直す際にサーバーから最新を取得し直す。
+function restoreAfterReload() {
+  const h = history.state;
+  const renderFn = h && h.snapshot && SCREEN_RENDERERS[h.screen];
+  if (!renderFn || h.screen === 'auth') return false;
+  const snap = h.snapshot;
+  // ログインし直して別のアカウントになっていたら、前の人の画面は出さない
+  if ((snap.user && snap.user.id) !== (state.user && state.user.id)) return false;
+  const fresh = { aiEnabled: state.aiEnabled, gscEnabled: state.gscEnabled, accountsEnabled: state.accountsEnabled, user: state.user };
+  Object.assign(state, snap, fresh);
+  replaceNextHistory = true;
+  setTimeout(() => { replaceNextHistory = false; }, 20000);
+  isRestoringHistory = false;
+  renderFn();
+  return true;
+}
