@@ -34,6 +34,7 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 3000;
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
 const AI_ENABLED = !!process.env.OPENAI_API_KEY;
+const LEGACY_MODEL = /^gpt-[34]/.test(MODEL); // gpt-3.5／gpt-4／gpt-4.1／gpt-4o など
 
 // ---------------------------------------------------------------
 // デモ用の仮想企業ペルソナ・一次情報・テーマ候補（UX検証用の仮データ）
@@ -167,7 +168,11 @@ async function callOpenAI(systemPrompt, userPrompt) {
     },
     body: JSON.stringify({
       model: MODEL,
-      max_tokens: 6000,
+      // 旧世代（gpt-3.5／4系）は max_tokens、新しいモデル（gpt-5／6系など）は max_completion_tokens を使う。
+      // 新しいモデルは、考える工程（推論）の分も上限に数えるため、広めに取る。
+      ...(LEGACY_MODEL ? { max_tokens: 6000 } : { max_completion_tokens: 16000 }),
+      // 推論の深さ（none／low／medium／high／xhigh）。省略するとモデルの既定。浅くすると、速く・安くなる。
+      ...(!LEGACY_MODEL && process.env.OPENAI_REASONING_EFFORT ? { reasoning_effort: process.env.OPENAI_REASONING_EFFORT } : {}),
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: systemPrompt },
