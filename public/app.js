@@ -39,6 +39,7 @@ const state = {
   accountsEnabled: false, // アカウント機能（ローカル版のみ）が使えるか
   user: null, // ログイン中のアカウント { id, username }
   authMode: 'login', // 'login' | 'register'
+  registrationOpen: true, // アカウントを自分で作れるか（公開版は、管理者が発行する）
   measuresFilter: 'all',
   registeredMedia: null, // 選んだ（登録した）メディア { id, name, siteUrl }
   mediaLinks: [], // 登録済みのリンク（記事のボタンのリンク先） { id, label, url }
@@ -230,7 +231,7 @@ function shell(innerHtml, { active = true } = {}) {
       </div>`;
   app.innerHTML = `
     <div class="appbar">
-      <span class="brand">メディアコンパス極<span class="ver">v1.00</span></span>
+      <span class="brand">メディアコンパス極<span class="ver">v1.01</span></span>
       ${navHtml}
       ${state.user ? `<span class="acct">👤 ${esc(state.user.username)} <a href="#" data-logout>ログアウト</a></span>` : ''}
       <span class="mode-badge ${state.aiEnabled ? 'ai' : 'sim'}"><span class="dot"></span>${state.aiEnabled ? 'AI連携中（ChatGPT）' : 'シミュレーションモード'}</span>
@@ -3146,14 +3147,15 @@ function renderAuth(message) {
           <div id="auth-error" style="color:var(--danger);font-size:12.5px;margin:10px 0 0;">${esc(message || '')}</div>
           <div class="btn-row">
             <button class="btn navy" type="submit" id="auth-submit">${isReg ? 'アカウントを作成する' : 'ログイン'}</button>
-            <button class="btn ghost" type="button" id="auth-toggle">${isReg ? 'ログインへ' : '新しくアカウントを作る'}</button>
+            ${state.registrationOpen ? `<button class="btn ghost" type="button" id="auth-toggle">${isReg ? 'ログインへ' : '新しくアカウントを作る'}</button>` : ''}
           </div>
         </form>
-        <div style="font-size:11px;color:var(--sub);margin-top:12px;">※このパソコンの中（data フォルダ）にだけ保存されます。パスワードは、読み取れない形（ハッシュ）にして保存します。</div>
+        <div style="font-size:11px;color:var(--sub);margin-top:12px;">${state.registrationOpen ? '※このパソコンの中（data フォルダ）にだけ保存されます。パスワードは、読み取れない形（ハッシュ）にして保存します。' : '※アカウントは、管理者が発行します。お持ちでない場合は、管理者にお問い合わせください。パスワードは、読み取れない形（ハッシュ）にして保存します。'}</div>
       </div>
     </div>
   `, { active: false });
-  document.getElementById('auth-toggle').addEventListener('click', () => { state.authMode = isReg ? 'login' : 'register'; renderAuth(); });
+  const authToggle = document.getElementById('auth-toggle');
+  if (authToggle) authToggle.addEventListener('click', () => { state.authMode = isReg ? 'login' : 'register'; renderAuth(); });
   document.getElementById('auth-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const errEl = document.getElementById('auth-error');
@@ -3377,6 +3379,8 @@ window.addEventListener('popstate', (e) => {
     state.gscEnabled = !!gscEnabled;
     const me = await api('/api/auth/me');
     state.accountsEnabled = !!me.enabled;
+    state.registrationOpen = me.registration !== false; // 公開版は、自己登録が閉じている（管理者が発行する）
+    if (!state.registrationOpen) state.authMode = 'login';
     state.user = me.user;
   } catch (e) { /* サーバー未接続でも最初の画面は表示する */ }
   if (state.accountsEnabled && !state.user) renderAuth(); // アカウント機能が有効なときは、ログイン（アカウント作成）が必須

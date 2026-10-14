@@ -34,7 +34,24 @@ app.get('/', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
-const AI_ENABLED = !!process.env.OPENAI_API_KEY;
+// 公開環境（Render）では、ログイン（PUBLIC_LOGIN=1）を設定するまで、AIは有効にしない。
+// （誰でも使える状態で、APIキーの利用料が使われてしまうのを防ぐ）
+const AI_KEY_SET = !!process.env.OPENAI_API_KEY;
+const AI_ENABLED = AI_KEY_SET && (!process.env.RENDER || accounts.ENABLED);
+if (AI_KEY_SET && !AI_ENABLED) console.warn('[AI] 公開環境では、ログインを設定（環境変数 PUBLIC_LOGIN=1 と ACCOUNT_USERS）するまで、AI連携は無効です。');
+
+// AIの利用回数の、1日あたりの上限（公開環境の既定は、文章300回・画像30回。0なら無制限）。上限を超えたら、シミュレーションに切り替わる。
+const AI_DAILY_LIMIT = Number(process.env.AI_DAILY_LIMIT ?? (process.env.RENDER ? 300 : 0));
+const AI_IMAGE_DAILY_LIMIT = Number(process.env.AI_IMAGE_DAILY_LIMIT ?? (process.env.RENDER ? 30 : 0));
+const aiUsage = { day: '', text: 0, image: 0 };
+function spendAi(kind) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (aiUsage.day !== today) { aiUsage.day = today; aiUsage.text = 0; aiUsage.image = 0; }
+  const limit = kind === 'image' ? AI_IMAGE_DAILY_LIMIT : AI_DAILY_LIMIT;
+  if (limit > 0 && aiUsage[kind] >= limit) return false;
+  aiUsage[kind] += 1;
+  return true;
+}
 const LEGACY_MODEL = /^gpt-[34]/.test(MODEL); // gpt-3.5／gpt-4／gpt-4.1／gpt-4o など
 
 // ---------------------------------------------------------------
@@ -161,6 +178,7 @@ function newId(prefix) {
 // AI 呼び出し（OpenAI Chat Completions API）。未設定時はシミュレーションへフォールバック。
 // ---------------------------------------------------------------
 async function callOpenAI(systemPrompt, userPrompt) {
+  if (!spendAi('text')) throw new Error('AIの1日の利用上限に達しました（翌日に再開します）');
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -1074,6 +1092,7 @@ app.post('/api/image/generate', async (req, res) => {
   if ((s.imageCount || 0) >= images.MAX_PER_SESSION) {
     return res.status(429).json({ error: `1記事あたりの画像生成の上限（${images.MAX_PER_SESSION}回）に達しました` });
   }
+  if (!spendAi('image')) return res.status(429).json({ error: '画像生成の1日の利用上限に達しました（翌日に再開します）' });
   s.imageCount = (s.imageCount || 0) + 1;
   try {
     const { buffer, mime } = await images.generate(images.buildPrompt(s.theme.title, block));

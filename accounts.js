@@ -1,13 +1,16 @@
 // アカウント（ログイン）と、アカウントごとの「施策ステータス管理」。ローカル版用。
 // データは data/accounts.json に保存する（サーバーを再起動しても残る。.gitignoreで除外済み）。
-// 公開環境（Render）では無効（誰でも登録できる公開サイトにアカウント機能を置かないため）。
+// 公開環境（Render）では、初期設定では無効。環境変数 PUBLIC_LOGIN=1 を設定したときだけ有効にする（ログイン必須の公開版）。
+// 公開版では、誰でも登録はできない。環境変数 ACCOUNT_USERS（ユーザー名:パスワード を、カンマ区切りで並べる）で、アカウントを発行する。
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const FILE = path.join(DATA_DIR, 'accounts.json');
-const ENABLED = !process.env.RENDER && process.env.ACCOUNTS_ENABLED !== '0';
+const PUBLIC_LOGIN = process.env.PUBLIC_LOGIN === '1';
+const ENABLED = (!process.env.RENDER || PUBLIC_LOGIN) && process.env.ACCOUNTS_ENABLED !== '0';
+const REGISTRATION_OPEN = !PUBLIC_LOGIN; // 公開版では、アカウントの自己登録は閉じる（管理者が発行する）
 
 const STATUSES = ['未着手', '対応中', '確認待ち', '完了'];
 const SESSION_DAYS = 7;
@@ -111,6 +114,30 @@ function sessionTable() {
   return db.sessions;
 }
 const failures = new Map(); // ユーザー名 -> { count, until }（総当たり対策）
+const ipFailures = new Map(); // 接続元IP -> { count, until }
+
+// 環境変数 ACCOUNT_USERS（「ユーザー名:パスワード」をカンマ区切り）で指定したアカウントを、起動のたびに用意する。
+// すでにあるアカウントは、パスワードが違っていれば、環境変数の内容に合わせる。（公開環境は、保存した内容が、再起動で消えることがあるため）
+function seedUsers() {
+  const raw = String(process.env.ACCOUNT_USERS || '').trim();
+  if (!raw) return;
+  let changed = false;
+  for (const entry of raw.split(/[,\n;]+/).map((x) => x.trim()).filter(Boolean)) {
+    const i = entry.indexOf(':');
+    const username = i > 0 ? entry.slice(0, i).trim() : '';
+    const password = i > 0 ? entry.slice(i + 1) : '';
+    if (!USERNAME_RE.test(username) || password.length < 8) { console.warn(`[アカウント] ACCOUNT_USERS の設定を読み飛ばしました（ユーザー名は半角英数字3〜50文字、パスワードは8文字以上）: ${username || '(空)'}`); continue; }
+    const user = db.users.find((u) => u.username.toLowerCase() === username.toLowerCase());
+    if (!user) {
+      db.users.push({ id: crypto.randomBytes(8).toString('hex'), username, passwordHash: hashPassword(password), createdAt: new Date().toISOString() });
+      changed = true;
+    } else if (!verifyPassword(password, user.passwordHash)) {
+      user.passwordHash = hashPassword(password);
+      changed = true;
+    }
+  }
+  if (changed) save();
+}
 
 function parseCookies(req) {
   const out = {};
@@ -132,13 +159,15 @@ function currentUser(req) {
   return db.users.find((u) => u.id === s.userId) || null;
 }
 
-function startSession(res, user) {
+const cookieFlags = (req) => `HttpOnly; SameSite=Lax; Path=/${req && req.secure ? '; Secure' : ''}`;
+
+function startSession(req, res, user) {
   const token = crypto.randomBytes(32).toString('hex');
   const table = sessionTable();
   for (const [k, v] of Object.entries(table)) if (v.exp < Date.now()) delete table[k]; // 期限切れを片付ける
   table[hashToken(token)] = { userId: user.id, exp: Date.now() + SESSION_DAYS * 86400000 };
   save();
-  res.setHeader('Set-Cookie', `${COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_DAYS * 86400}`);
+  res.setHeader('Set-Cookie', `${COOKIE}=${token}; ${cookieFlags(req)}; Max-Age=${SESSION_DAYS * 86400}`);
 }
 
 const publicUser = (u) => ({ id: u.id, username: u.username });
@@ -224,7 +253,7 @@ function cleanMeasureInput(body, { partial }) {
 }
 
 function install(app) {
-  if (ENABLED) load();
+  if (ENABLED) { load(); seedUsers(); }
 
   const requireEnabled = (req, res, next) => (ENABLED ? next() : res.status(404).json({ error: 'accounts_disabled' }));
   const requireLogin = (req, res, next) => {
@@ -236,10 +265,11 @@ function install(app) {
 
   app.get('/api/auth/me', (req, res) => {
     const user = ENABLED ? currentUser(req) : null;
-    res.json({ enabled: ENABLED, user: user ? publicUser(user) : null, statuses: STATUSES });
+    res.json({ enabled: ENABLED, registration: REGISTRATION_OPEN, user: user ? publicUser(user) : null, statuses: STATUSES });
   });
 
   app.post('/api/auth/register', requireEnabled, (req, res) => {
+    if (!REGISTRATION_OPEN) return res.status(403).json({ error: 'この環境では、アカウントは管理者が発行します。管理者にお問い合わせください' });
     const username = String(req.body?.username ?? '').trim();
     const password = String(req.body?.password ?? '');
     if (!USERNAME_RE.test(username)) return res.status(400).json({ error: 'ユーザー名は、半角の英数字と _ . @ + - で、3〜50文字にしてください' });
@@ -248,7 +278,7 @@ function install(app) {
     const user = { id: crypto.randomBytes(8).toString('hex'), username, passwordHash: hashPassword(password), createdAt: new Date().toISOString() };
     db.users.push(user);
     save();
-    startSession(res, user);
+    startSession(req, res, user);
     res.json({ user: publicUser(user) });
   });
 
@@ -257,24 +287,28 @@ function install(app) {
     const password = String(req.body?.password ?? '');
     const key = username.toLowerCase();
     const f = failures.get(key);
-    if (f && f.until > Date.now()) return res.status(429).json({ error: 'ログインに続けて失敗したため、しばらく時間をおいてからお試しください' });
+    const fi = ipFailures.get(req.ip);
+    if ((f && f.until > Date.now()) || (fi && fi.until > Date.now())) return res.status(429).json({ error: 'ログインに続けて失敗したため、しばらく時間をおいてからお試しください' });
     const user = db.users.find((u) => u.username.toLowerCase() === key);
     // ユーザーがいない場合も、同じだけ時間をかけて、存在の有無を推測されにくくする
     const ok = user ? verifyPassword(password, user.passwordHash) : (verifyPassword(password, `${'0'.repeat(32)}:${'0'.repeat(128)}`), false);
     if (!ok) {
       const count = (f?.count || 0) + 1;
       failures.set(key, { count, until: count >= 5 ? Date.now() + 60000 : 0 });
+      const ci = (fi?.count || 0) + 1; // 同じ接続元からの失敗も数える（ユーザー名を変えながらの総当たり対策）
+      ipFailures.set(req.ip, { count: ci, until: ci >= 20 ? Date.now() + 10 * 60000 : 0 });
       return res.status(401).json({ error: 'ユーザー名またはパスワードが正しくありません' });
     }
     failures.delete(key);
-    startSession(res, user);
+    ipFailures.delete(req.ip);
+    startSession(req, res, user);
     res.json({ user: publicUser(user) });
   });
 
   app.post('/api/auth/logout', (req, res) => {
     const token = parseCookies(req)[COOKIE];
     if (token && sessionTable()[hashToken(token)]) { delete sessionTable()[hashToken(token)]; save(); }
-    res.setHeader('Set-Cookie', `${COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
+    res.setHeader('Set-Cookie', `${COOKIE}=; ${cookieFlags(req)}; Max-Age=0`);
     res.json({ ok: true });
   });
 
@@ -454,4 +488,4 @@ function updateMeasure(userId, id, patch) {
 }
 const listMeasures = (userId) => db.measures.filter((m) => m.userId === userId);
 
-module.exports = { install, createMeasure, findMeasure, updateMeasure, listMeasures, STATUSES, ENABLED, setIntegration, getIntegration, getRegisteredMedia, updateRegisteredMedia };
+module.exports = { install, PUBLIC_LOGIN, createMeasure, findMeasure, updateMeasure, listMeasures, STATUSES, ENABLED, setIntegration, getIntegration, getRegisteredMedia, updateRegisteredMedia };
