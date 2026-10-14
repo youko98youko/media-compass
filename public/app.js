@@ -26,6 +26,8 @@ const state = {
   existingAnalysis: null,
   newHearing: { history: [], question: null, questionNumber: 0, maxQuestions: 4, done: false, loading: false },
   direction: null,
+  dirIntent: { mode: 'extend', text: '', stage: 'input', questions: [], answers: [] }, // 方向性の設計に渡す「今後の方針」
+  lastIntent: null, // 直近の設計に使った方針（確認画面に表示する）
   gscConnected: false,
   gscDemo: false, // デモ連携を選んだか（実際のGoogle連携とは別）
   gscReconnect: false, // 連携済みでも、別のアカウントで連携し直すか
@@ -1061,7 +1063,7 @@ function renderExistingAnalysisResult() {
       </div>
     </div>
   `, { active: false, nav: false });
-  document.getElementById('go-direction').addEventListener('click', renderDirectionGenerating);
+  document.getElementById('go-direction').addEventListener('click', () => startDirectionIntent());
   pushHistory();
 }
 
@@ -1195,50 +1197,274 @@ async function submitBusinessAnswer() {
 // ---------------------------------------------------------------
 // STEP 0-3: メディアの方向性・テーマ領域設計【新設・v2】
 // ---------------------------------------------------------------
-async function renderDirectionGenerating() {
+// 方針を渡さずに設計する（新規メディアの流れ用。従来どおり）
+function renderDirectionGenerating() { return designDirection(undefined); }
+
+// intent が undefined のときは、前回の方針をそのまま使う（サーバー側）。null のときは、方針なし（実績だけ）で設計する。
+async function designDirection(intent) {
   state.screen = 'directionGenerating';
-  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>AIがテーマ領域を設計しています…</div></div>`, { active: false, nav: false });
+  shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>AIがテーマ領域を設計しています…${intent && intent.text ? '<br><span style="font-size:11.5px;color:var(--sub);">実績と、今後の方針をふまえて設計します（20〜40秒ほどかかります）</span>' : ''}</div></div>`, { active: false });
   let clusters = [], topCluster = null, mode;
   try {
-    ({ clusters, topCluster, mode } = await api('/api/media/direction', { body: { mediaId: state.mediaId } }));
+    ({ clusters, topCluster, mode } = await api('/api/media/direction', { body: intent === undefined ? { mediaId: state.mediaId } : { mediaId: state.mediaId, intent } }));
   } catch (e) {
-    toast('方向性の生成に失敗しました');
+    if (e.authExpired) return;
+    toast(e.message && e.message !== 'NO_SERVER' ? e.message : '方向性の生成に失敗しました');
+    if (intent !== undefined) { renderDirectionIntent(); return; }
   }
   state.direction = { clusters, topCluster };
   state.lastMode = mode;
+  state.lastIntent = intent && (intent.text || (intent.qa && intent.qa.length)) ? { mode: intent.mode, text: intent.text } : null;
+  dirEdit = { idx: null, draft: null, del: null };
   renderDirectionConfirm();
 }
 
-function clusterCardHtml(c) {
+// ---------------------------------------------------------------
+// 方針の入力：実績だけでなく、ユーザーの「今後の方針」も材料にする（AIが、追加の質問で具体化を手伝う）
+// ---------------------------------------------------------------
+const INTENT_LABELS = {
+  extend: ['今の延長で伸ばす', '実績をもとに、今のテーマを伸ばします（方針の記述は任意）'],
+  expand: ['一部を新しい領域に広げる', '今のテーマは続けながら、新しい領域を加えます'],
+  pivot: ['大きく方向転換する', '今のテーマを縮小・整理して、新しい領域に移ります'],
+};
+
+// 前回の方針（あれば）を読み込んでから、方針の入力を始める
+async function startDirectionIntent() {
+  let saved = null;
+  try {
+    const r = await api(`/api/media/direction-state?mediaId=${encodeURIComponent(state.mediaId)}`);
+    saved = r.intent;
+  } catch (e) { if (e.authExpired) return; }
+  if (saved) {
+    const qa = saved.qa || [];
+    state.dirIntent = { mode: saved.mode, text: saved.text || '', stage: qa.length ? 'questions' : 'input', questions: qa.map((x) => ({ question: x.question, hint: '' })), answers: qa.map((x) => x.answer) };
+  } else {
+    state.dirIntent = { mode: 'extend', text: '', stage: 'input', questions: [], answers: [] };
+  }
+  renderDirectionIntent();
+}
+
+function currentIntent(withQa) {
+  const it = state.dirIntent;
+  const qa = withQa ? it.questions.map((q, i) => ({ question: q.question, answer: (it.answers[i] || '').trim() })).filter((x) => x.answer) : [];
+  return { mode: it.mode, text: (it.text || '').trim(), qa };
+}
+
+function renderDirectionIntent() {
+  state.screen = 'directionIntent';
+  const it = state.dirIntent;
+
+  if (it.stage === 'questions') {
+    const qs = it.questions.map((q, i) => `
+      <div class="card">
+        <label for="dq-${i}" style="display:block;font-weight:700;font-size:14px;margin-bottom:6px;">Q${i + 1}. ${esc(q.question)}</label>
+        <textarea id="dq-${i}" data-q="${i}" rows="2" maxlength="600" placeholder="${esc(q.hint ? `例：${q.hint.replace(/^例[：:]\s*/, '')}` : '')}" style="width:100%;font-family:inherit;font-size:13.5px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;box-sizing:border-box;">${esc(it.answers[i] || '')}</textarea>
+      </div>`).join('');
+    shell(`
+      <div class="wrap">
+        <div class="screen-head">
+          <div class="eyebrow">STEP 0-3 ・ メディアの方向性</div>
+          <h1>もう少し、具体的に教えてください</h1>
+          <p>書いていただいた方針をもとに、AIが質問を作りました。答えられる範囲で、答えてください（空欄でもかまいません）。具体的に答えるほど、方向性の案が、方針に近づきます。</p>
+        </div>
+        <div class="card">
+          <div style="font-size:11.5px;color:var(--sub);margin-bottom:4px;">今後の方針（${esc(INTENT_LABELS[it.mode][0])}）</div>
+          <div style="font-size:14px;line-height:1.7;">${esc(it.text)}</div>
+          <div class="btn-row"><button class="btn ghost small" id="di-back">方針を書き直す</button></div>
+        </div>
+        ${qs}
+        <div class="btn-row">
+          <button class="btn gold" id="di-design">この内容で、方向性を設計する →</button>
+          <button class="btn ghost" id="di-skip">質問に答えずに設計する</button>
+        </div>
+      </div>
+    `, { active: false });
+    app.querySelectorAll('[data-q]').forEach((ta) => ta.addEventListener('input', () => { it.answers[Number(ta.dataset.q)] = ta.value; }));
+    document.getElementById('di-back').addEventListener('click', () => { it.stage = 'input'; renderDirectionIntent(); });
+    document.getElementById('di-design').addEventListener('click', () => designDirection(currentIntent(true)));
+    document.getElementById('di-skip').addEventListener('click', () => designDirection(currentIntent(false)));
+    pushHistory();
+    return;
+  }
+
+  const opts = Object.entries(INTENT_LABELS).map(([k, [name, desc]]) => `
+    <label style="display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:8px;cursor:pointer;">
+      <input type="radio" name="di-mode" value="${k}" ${it.mode === k ? 'checked' : ''} style="margin-top:3px;">
+      <span><b style="font-size:14px;">${esc(name)}</b><br><span style="font-size:12.5px;color:var(--sub);">${esc(desc)}</span></span>
+    </label>`).join('');
+  shell(`
+    <div class="wrap">
+      <div class="screen-head">
+        <div class="eyebrow">STEP 0-3 ・ メディアの方向性</div>
+        <h1>このメディアを、これからどうしていきたいですか？</h1>
+        <p>これまでの実績（サイトの記事・Search Console）に加えて、今後の方針もふまえて、方向性を設計します。方針を書いた場合は、<b>実績より方針を優先</b>します。</p>
+      </div>
+      <div class="card">${opts}</div>
+      <div class="card">
+        <label for="di-text" style="display:block;font-size:12.5px;font-weight:700;color:var(--sub);margin-bottom:4px;">今後の方針（自由に書いてください）</label>
+        <textarea id="di-text" rows="4" maxlength="1000" placeholder="例：今後は、AI検索に引用され、おすすめされるサイトにするためのテーマに移したい。" style="width:100%;font-family:inherit;font-size:14px;padding:9px 11px;border:1px solid var(--line);border-radius:8px;box-sizing:border-box;">${esc(it.text)}</textarea>
+        <div style="font-size:11.5px;color:var(--sub);margin-top:6px;">短くてかまいません。書いたあとに、AIが、足りない点を、3つほど質問します。新しい領域（実績がまだない領域）は、方針にもとづく「仮説」として、案に出ます。</div>
+      </div>
+      <div class="btn-row">
+        <button class="btn gold" id="di-ask">AIに追加質問してもらう →</button>
+        <button class="btn ghost" id="di-go"></button>
+      </div>
+      <div id="di-error" style="color:var(--danger);font-size:12.5px;margin-top:8px;"></div>
+    </div>
+  `, { active: false });
+  const ta = document.getElementById('di-text');
+  const ask = document.getElementById('di-ask');
+  const go = document.getElementById('di-go');
+  const refresh = () => {
+    const hasText = !!(it.text || '').trim();
+    const plain = it.mode === 'extend' && !hasText; // 方針なし＝実績だけで設計（従来どおり）
+    ask.style.display = plain ? 'none' : '';
+    ask.disabled = !hasText;
+    go.textContent = plain ? '実績だけで、方向性を設計する →' : '質問なしで設計する';
+    go.disabled = !plain && !hasText;
+  };
+  ta.addEventListener('input', () => { it.text = ta.value; refresh(); });
+  app.querySelectorAll('input[name="di-mode"]').forEach((r) => r.addEventListener('change', () => { it.mode = r.value; refresh(); }));
+  refresh();
+  go.addEventListener('click', () => designDirection(currentIntent(false)));
+  ask.addEventListener('click', async () => {
+    const text = (it.text || '').trim();
+    if (!text) return;
+    shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>AIが、追加の質問を考えています…</div></div>`, { active: false });
+    try {
+      const r = await api('/api/media/direction/questions', { body: { mediaId: state.mediaId, mode: it.mode, text } });
+      it.questions = r.questions;
+      it.answers = r.questions.map(() => '');
+      it.stage = 'questions';
+      renderDirectionIntent();
+    } catch (e) {
+      if (e.authExpired) return;
+      renderDirectionIntent();
+      const el = document.getElementById('di-error');
+      if (el) el.textContent = '質問を作成できませんでした。「質問なしで設計する」を選ぶか、もう一度お試しください';
+    }
+  });
+  pushHistory();
+}
+
+// ---------------------------------------------------------------
+// テーマ領域の表示と、手直し（追加・削除・名前や優先度の変更）
+// ---------------------------------------------------------------
+let dirEdit = { idx: null, draft: null, del: null }; // idx: 編集中の番号 | 'new' | null
+
+function clusterCardHtml(c, i, { editable = false } = {}) {
+  if (editable && dirEdit.idx === i) return clusterFormHtml(dirEdit.draft);
+  const chgCls = c.change === '新規' ? 'blue' : c.change === '縮小' ? 'grey' : 'ok';
+  const basisText = { '実績': '実績にもとづく', '方針': '方針にもとづく', '両方': '実績＋方針', '手動': '手動で追加・変更' }[c.basis] || '';
   return `
     <div class="card">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
         <span class="pill ${c.priority === '高' ? 'danger' : c.priority === '中' ? 'gold' : 'grey'}">優先度：${esc(c.priority)}</span>
         <span class="pill ${c.coverage === '十分' ? 'ok' : c.coverage === '一部' ? 'gold' : 'grey'}">カバレッジ：${esc(c.coverage)}</span>
+        ${c.change ? `<span class="pill ${chgCls}">${esc(c.change)}</span>` : ''}
+        ${c.hypothesis ? '<span class="pill gold">実績なし（方針にもとづく仮説）</span>' : ''}
+        ${basisText ? `<span style="font-size:11px;color:var(--sub);">${esc(basisText)}</span>` : ''}
       </div>
       <h3>${esc(c.name)}</h3>
       <div style="font-size:12.5px;color:var(--sub);">${esc(c.reason)}</div>
+      ${c.existingAdvice ? `<div style="font-size:12.5px;margin-top:6px;"><b>既存記事について：</b>${esc(c.existingAdvice)}</div>` : ''}
+      ${editable ? (dirEdit.del === i
+        ? '<div class="btn-row"><span style="font-size:12.5px;color:var(--danger);align-self:center;">このテーマ領域を削除します。</span><button class="btn danger-outline small" data-cl-delyes="' + i + '">削除する</button><button class="btn ghost small" data-cl-delno="1">やめる</button></div>'
+        : `<div class="btn-row"><button class="btn ghost small" data-cl-edit="${i}">編集</button><button class="btn ghost small" data-cl-del="${i}">削除</button></div>`) : ''}
     </div>`;
+}
+
+function clusterFormHtml(d) {
+  const sel = (id, list, cur) => `<select id="${id}" style="font-family:inherit;font-size:13.5px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;">${list.map((v) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${v}</option>`).join('')}</select>`;
+  return `
+    <div class="card" style="border-color:var(--navy);">
+      <div style="font-size:12px;font-weight:700;color:var(--sub);margin-bottom:6px;">${dirEdit.idx === 'new' ? 'テーマ領域を追加' : 'テーマ領域を編集'}</div>
+      <input id="cl-name" type="text" maxlength="60" placeholder="テーマ領域の名前（例：AI検索に引用されるための基礎）" value="${esc(d.name)}" style="width:100%;font-family:inherit;font-size:14px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;box-sizing:border-box;margin-bottom:8px;">
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px;font-size:12.5px;color:var(--sub);">
+        <label>優先度 ${sel('cl-priority', ['高', '中', '低'], d.priority)}</label>
+        <label>カバレッジ ${sel('cl-coverage', ['未着手', '一部', '十分'], d.coverage)}</label>
+        <label>区分 ${sel('cl-change', ['継続', '縮小', '新規'], d.change || '継続')}</label>
+      </div>
+      <textarea id="cl-reason" rows="2" maxlength="400" placeholder="理由・メモ（任意）" style="width:100%;font-family:inherit;font-size:13px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;box-sizing:border-box;">${esc(d.reason)}</textarea>
+      <div id="cl-error" style="color:var(--danger);font-size:12.5px;margin-top:4px;"></div>
+      <div class="btn-row"><button class="btn navy small" id="cl-save">保存</button><button class="btn ghost small" id="cl-cancel">キャンセル</button></div>
+    </div>`;
+}
+
+async function persistClusters(clusters) {
+  const r = await api('/api/media/direction/save', { body: { mediaId: state.mediaId, clusters } });
+  state.direction = { clusters: r.clusters, topCluster: r.topCluster };
+}
+
+// 手直しのボタンを動かす。redraw は、その画面を描き直す関数（履歴は増やさず、上書きする）
+function bindClusterEditing(redraw) {
+  const go = () => { replaceNextHistory = true; redraw(); };
+  const list = () => (state.direction && state.direction.clusters ? [...state.direction.clusters] : []);
+  app.querySelectorAll('[data-cl-edit]').forEach((b) => b.addEventListener('click', () => {
+    const i = Number(b.dataset.clEdit);
+    dirEdit = { idx: i, draft: { ...list()[i] }, del: null };
+    go();
+  }));
+  app.querySelectorAll('[data-cl-del]').forEach((b) => b.addEventListener('click', () => { dirEdit = { idx: null, draft: null, del: Number(b.dataset.clDel) }; go(); }));
+  app.querySelectorAll('[data-cl-delno]').forEach((b) => b.addEventListener('click', () => { dirEdit = { idx: null, draft: null, del: null }; go(); }));
+  app.querySelectorAll('[data-cl-delyes]').forEach((b) => b.addEventListener('click', async () => {
+    const next = list().filter((_, i) => i !== Number(b.dataset.clDelyes));
+    if (!next.length) { toast('テーマ領域は、1つ以上必要です'); return; }
+    try { await persistClusters(next); } catch (e) { if (!e.authExpired) toast(e.message); return; }
+    dirEdit = { idx: null, draft: null, del: null };
+    go();
+    toast('テーマ領域を削除しました');
+  }));
+  const add = document.getElementById('cl-add');
+  if (add) add.addEventListener('click', () => {
+    dirEdit = { idx: 'new', draft: { name: '', priority: '中', coverage: '未着手', change: '新規', basis: '手動', hypothesis: true, reason: '', existingAdvice: '' }, del: null };
+    go();
+  });
+  const cancel = document.getElementById('cl-cancel');
+  if (cancel) cancel.addEventListener('click', () => { dirEdit = { idx: null, draft: null, del: null }; go(); });
+  const saveBtn = document.getElementById('cl-save');
+  if (saveBtn) saveBtn.addEventListener('click', async () => {
+    const name = document.getElementById('cl-name').value.trim();
+    if (!name) { document.getElementById('cl-error').textContent = 'テーマ領域の名前を入力してください'; return; }
+    const d = {
+      ...dirEdit.draft, name,
+      priority: document.getElementById('cl-priority').value,
+      coverage: document.getElementById('cl-coverage').value,
+      change: document.getElementById('cl-change').value,
+      reason: document.getElementById('cl-reason').value.trim(),
+    };
+    if (dirEdit.idx !== 'new' && dirEdit.draft.basis && dirEdit.draft.basis !== '手動') d.basis = '両方'; // 手を加えた領域は、AIの案＋手直し
+    const next = list();
+    if (dirEdit.idx === 'new') next.push(d); else next[dirEdit.idx] = d;
+    try { await persistClusters(next); } catch (e) { if (!e.authExpired) document.getElementById('cl-error').textContent = e.message; return; }
+    dirEdit = { idx: null, draft: null, del: null };
+    go();
+    toast('保存しました');
+  });
 }
 
 function renderDirectionConfirm() {
   state.screen = 'directionConfirm';
   const clusters = state.direction?.clusters || [];
-  const rows = clusters.map(clusterCardHtml).join('');
+  const rows = clusters.map((c, i) => clusterCardHtml(c, i, { editable: true })).join('');
+  const li = state.lastIntent;
 
   shell(`
     <div class="wrap">
       <div class="screen-head">
         <div class="eyebrow">STEP 0-3 ・ メディアの方向性</div>
         <h1>メディアの方向性・テーマ領域を確認する</h1>
-        <p>扱うべきテーマ領域とその優先度です。内容を確認し、必要なら調整したうえで進めてください（3.4）。</p>
+        <p>扱うべきテーマ領域とその優先度です。内容を確認し、必要なら、編集・削除・追加で調整したうえで進めてください（3.4）。</p>
       </div>
+      ${li && li.text ? `<div class="card" style="background:var(--ext-bg);"><div style="font-size:11.5px;color:var(--sub);margin-bottom:3px;">今回の設計に使った、今後の方針（${esc(INTENT_LABELS[li.mode][0])}）</div><div style="font-size:13.5px;line-height:1.7;">${esc(li.text)}</div></div>` : ''}
       ${rows}
+      ${dirEdit.idx === 'new' ? clusterFormHtml(dirEdit.draft) : '<div class="btn-row"><button class="btn outline small" id="cl-add">＋ テーマ領域を追加</button></div>'}
       <div style="font-size:11px;color:var(--sub);margin:10px 0;">未定：業種別テーマ体系をゼロ生成するか雛形を用意するか</div>
       <div class="btn-row"><button class="btn gold" id="confirm-direction">この方向性で進める →</button></div>
     </div>
-  `, { active: false, nav: false });
+  `, { active: false });
   document.getElementById('confirm-direction').addEventListener('click', confirmDirection);
+  bindClusterEditing(renderDirectionConfirm);
   pushHistory();
 }
 
@@ -1249,24 +1475,31 @@ async function confirmDirection() {
   renderDashboard();
 }
 
-async function renderDirectionSummary() {
+let dirCtx = { regList: null, dirState: null };
+
+async function renderDirectionSummary({ reload = true } = {}) {
   state.screen = 'direction';
   // ローカル版：方向性は、登録済みメディアごとにサーバーに保存されている。対象のメディアを決めて、取得する。
-  let regList = null;
-  let dirState = null;
-  if (state.accountsEnabled && state.user) {
-    shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>メディアの方向性を読み込んでいます…</div></div>`, { active: false });
-    try {
-      ({ media: regList } = await api('/api/registered-media'));
-      const cur = regList.find((x) => x.id === (state.registeredMedia && state.registeredMedia.id)) || regList[0];
-      if (cur) {
-        await ensureWorkspace(cur);
-        dirState = await api(`/api/media/direction-state?mediaId=${encodeURIComponent(state.mediaId)}`);
-        state.direction = dirState.clusters ? { clusters: dirState.clusters, topCluster: dirState.topCluster } : null;
-      }
-    } catch (e) { if (e.authExpired) return; regList = regList || []; }
+  if (reload) {
+    dirEdit = { idx: null, draft: null, del: null };
+    dirCtx = { regList: null, dirState: null };
+    if (state.accountsEnabled && state.user) {
+      shell(`<div class="wrap"><div class="loading-box"><div class="spinner"></div>メディアの方向性を読み込んでいます…</div></div>`, { active: false });
+      try {
+        const { media } = await api('/api/registered-media');
+        dirCtx.regList = media;
+        const cur = media.find((x) => x.id === (state.registeredMedia && state.registeredMedia.id)) || media[0];
+        if (cur) {
+          await ensureWorkspace(cur);
+          dirCtx.dirState = await api(`/api/media/direction-state?mediaId=${encodeURIComponent(state.mediaId)}`);
+          state.direction = dirCtx.dirState.clusters ? { clusters: dirCtx.dirState.clusters, topCluster: dirCtx.dirState.topCluster } : null;
+        }
+      } catch (e) { if (e.authExpired) return; dirCtx.regList = dirCtx.regList || []; }
+    }
   }
+  const { regList, dirState } = dirCtx;
   const clusters = state.direction?.clusters || [];
+  const canEdit = !!state.mediaId && clusters.length > 0;
   const mediaPickHtml = regList && regList.length ? `
       <div class="card">
         <label for="dir-media" style="display:block;font-size:12.5px;font-weight:700;color:var(--sub);margin-bottom:4px;">対象のメディア</label>
@@ -1277,19 +1510,27 @@ async function renderDirectionSummary() {
   const emptyHtml = `
       <div class="card">
         <h3 style="margin:0 0 6px;">まだメディアの方向性が設計されていません</h3>
-        <p style="font-size:13px;color:var(--sub);margin:0 0 10px;">方向性は、既存メディアの分析結果をもとに、AIが設計します。次の順で進めてください。</p>
+        <p style="font-size:13px;color:var(--sub);margin:0 0 10px;">方向性は、既存メディアの分析結果と、あなたの今後の方針をもとに、AIが設計します。次の順で進めてください。</p>
         <ol style="font-size:13px;line-height:1.9;margin:0 0 12px;padding-left:20px;">
           <li>上のメニューの「ホーム」から、「既存メディアを分析する」を選ぶ</li>
           <li>登録済みのメディアを選び、サイトの分析を実行する（GSCは、つないでおくと分析に使われます）</li>
-          <li>分析結果の画面で、「メディアの方向性を見る」を押す（ここでAIが方向性を設計します）</li>
-          <li>内容を確認して、「この方向性で進める」を押す</li>
+          <li>分析結果の画面で、「メディアの方向性を見る」を押す</li>
+          <li>今後の方針（これからどうしたいか）を書き、AIの追加質問に答える</li>
+          <li>設計された案を確認して、「この方向性で進める」を押す</li>
         </ol>
         <div class="btn-row">
           ${dirState && dirState.hasAnalysis ? '<button class="btn gold" id="dir-design">分析結果をもとに、方向性を設計する →</button>' : ''}
           <button class="btn ${dirState && dirState.hasAnalysis ? 'outline' : 'navy'}" id="dir-go-home">ホーム（既存メディアを分析する）へ →</button>
         </div>
       </div>`;
-  const rows = clusters.length ? clusters.map(clusterCardHtml).join('') : emptyHtml;
+  const it = dirState && dirState.intent;
+  const intentHtml = clusters.length && it && (it.text || (it.qa || []).length) ? `
+      <div class="card" style="background:var(--ext-bg);">
+        <div style="font-size:11.5px;color:var(--sub);margin-bottom:3px;">今後の方針（${esc(INTENT_LABELS[it.mode] ? INTENT_LABELS[it.mode][0] : '')}）</div>
+        <div style="font-size:13.5px;line-height:1.7;">${esc(it.text || '')}</div>
+        ${(it.qa || []).map((x) => `<div style="font-size:12px;color:var(--sub);margin-top:6px;">Q：${esc(x.question)}<br><span style="color:var(--fg,#222);">A：${esc(x.answer)}</span></div>`).join('')}
+      </div>` : '';
+  const rows = clusters.length ? clusters.map((c, i) => clusterCardHtml(c, i, { editable: canEdit })).join('') : emptyHtml;
 
   shell(`
     <div class="wrap">
@@ -1299,8 +1540,10 @@ async function renderDirectionSummary() {
         <p>「今、作るべき記事テーマ」は、このテーマ領域の設計結果を踏まえて提示されます（3.4）。</p>
       </div>
       ${mediaPickHtml}
+      ${intentHtml}
       ${rows}
-      ${clusters.length && dirState && dirState.hasAnalysis ? '<div class="btn-row"><button class="btn outline" id="dir-design">方向性を設計し直す</button></div>' : ''}
+      ${canEdit && dirEdit.idx === 'new' ? clusterFormHtml(dirEdit.draft) : ''}
+      ${canEdit && dirEdit.idx !== 'new' ? `<div class="btn-row"><button class="btn outline small" id="cl-add">＋ テーマ領域を追加</button>${dirState && dirState.hasAnalysis ? '<button class="btn gold small" id="dir-design">方針を変えて、設計し直す →</button>' : ''}</div>` : ''}
     </div>
   `, { active: false });
   const sel = document.getElementById('dir-media');
@@ -1309,9 +1552,10 @@ async function renderDirectionSummary() {
     renderDirectionSummary();
   });
   const design = document.getElementById('dir-design');
-  if (design) design.addEventListener('click', renderDirectionGenerating);
+  if (design) design.addEventListener('click', () => startDirectionIntent());
   const goHome = document.getElementById('dir-go-home');
   if (goHome) goHome.addEventListener('click', renderMediaState);
+  bindClusterEditing(() => renderDirectionSummary({ reload: false }));
   pushHistory();
 }
 
@@ -3089,6 +3333,7 @@ const SCREEN_RENDERERS = {
   understandNewForm: renderNewBusinessForm,
   understandNewHearing: renderNewHearing,
   directionConfirm: renderDirectionConfirm,
+  directionIntent: renderDirectionIntent,
   direction: renderDirectionSummary,
   dashboard: renderDashboard,
   themeDetail: renderThemeDetail,

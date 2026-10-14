@@ -266,6 +266,7 @@ app.post('/api/media/state', (req, res) => {
     existingAnalysis: null,
     topicClusters: null,
     directionConfirmed: false,
+    intent: reg ? (reg.intent || null) : null, // 今後の方針（ユーザーが書いた意図と、追加質問への回答）。登録済みメディアなら、前回のものを引き継ぐ
   });
   res.json({ mediaId, registered: reg ? { id: reg.id, name: reg.name, siteUrl: reg.siteUrl } : null });
 });
@@ -286,7 +287,7 @@ app.post('/api/media/ensure', (req, res) => {
     m = {
       id: mediaId, userId: req.user.id, regId: reg.id, mediaState: 'existing', siteUrl: reg.siteUrl, businessInfo: null, wordpress: null,
       hearing: { history: [], lastQuestion: null, done: false, maxQuestions: 4 },
-      existingAnalysis: reg.analysis || null, topicClusters: reg.direction?.clusters || null, directionConfirmed: !!reg.direction?.confirmed,
+      existingAnalysis: reg.analysis || null, topicClusters: reg.direction?.clusters || null, directionConfirmed: !!reg.direction?.confirmed, intent: reg.intent || null,
     };
     mediaProfiles.set(mediaId, m);
   }
@@ -596,13 +597,98 @@ app.post('/api/media/hearing/next', async (req, res) => {
 });
 
 // STEP 0-3: メディアの方向性・テーマ領域設計（3.4）
+// 実績（サイトの記事・Search Console）に加えて、ユーザーが書いた「今後の方針」も材料にする。
+// 方針があるときは、実績より方針を優先し、現状のテーマを「継続／縮小」、方針から生まれる領域を「新規」として示す。
+const INTENT_MODES = { extend: '今の延長で伸ばす', expand: '一部を新しい領域に広げる', pivot: '大きく方向転換する' };
+const clip = (v, n) => String(v ?? '').trim().slice(0, n);
+
+function cleanIntent(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const mode = INTENT_MODES[raw.mode] ? raw.mode : 'extend';
+  const text = clip(raw.text, 1000);
+  const qa = (Array.isArray(raw.qa) ? raw.qa : []).slice(0, 5)
+    .map((x) => ({ question: clip(x && x.question, 200), answer: clip(x && x.answer, 600) }))
+    .filter((x) => x.question && x.answer);
+  if (mode === 'extend' && !text && !qa.length) return null; // 方針の指定なし＝従来どおり、実績だけから設計する
+  return { mode, text, qa, savedAt: new Date().toISOString() };
+}
+
+function intentText(intent) {
+  if (!intent) return '';
+  const lines = [`今後の方針（${INTENT_MODES[intent.mode]}）: ${intent.text || '（記述なし）'}`];
+  for (const x of intent.qa || []) lines.push(`Q: ${x.question} / A: ${x.answer}`);
+  return lines.join('\n');
+}
+
+const CLUSTER_ENUM = {
+  priority: ['高', '中', '低'],
+  coverage: ['未着手', '一部', '十分'],
+  change: ['継続', '縮小', '新規'],
+  basis: ['実績', '方針', '両方', '手動'],
+};
+function cleanClusters(arr) {
+  const pick = (v, list, dflt) => (list.includes(v) ? v : dflt);
+  return (Array.isArray(arr) ? arr : []).slice(0, 8).map((c) => ({
+    name: clip(c && c.name, 60),
+    priority: pick(c && c.priority, CLUSTER_ENUM.priority, '中'),
+    coverage: pick(c && c.coverage, CLUSTER_ENUM.coverage, '一部'),
+    reason: clip(c && c.reason, 400),
+    change: pick(c && c.change, CLUSTER_ENUM.change, '継続'),
+    basis: pick(c && c.basis, CLUSTER_ENUM.basis, '実績'),
+    hypothesis: !!(c && c.hypothesis),
+    existingAdvice: clip(c && c.existingAdvice, 300),
+  })).filter((c) => c.name);
+}
+
+// 方針をより具体的にするための、AIからの追加質問（3つ）
+const FALLBACK_QUESTIONS = [
+  { question: 'この方針で、主に届けたい読者は誰ですか？', hint: '例：自社サイトを運営する中小企業の担当者' },
+  { question: '記事を読んだ読者に、どんな行動や状態になってほしいですか？', hint: '例：自社サイトをAI検索に引用されるよう改善し、問い合わせにつなげる' },
+  { question: '今のメディアの強みや、これまでの記事のうち、活かしたいもの・扱わないものはありますか？', hint: '例：SEOの実績は活かす。ツール紹介の記事は扱わない' },
+];
+app.post('/api/media/direction/questions', async (req, res) => {
+  const m = getMediaProfile(req, res);
+  if (!m) return;
+  const mode = INTENT_MODES[req.body?.mode] ? req.body.mode : 'expand';
+  const text = clip(req.body?.text, 1000);
+  if (!text) return res.status(400).json({ error: '今後の方針を書いてください' });
+  const a = m.existingAnalysis;
+  const current = a ? `現在のメディア: ${a.siteSummary || ''}（${a.industry || ''}）／現在の主なテーマ: ${(a.topicsCovered || []).map((t) => t.name).join('、')}` : '現在のメディアの情報: なし';
+  const { data, mode: aiMode } = await getStructured({
+    system: `あなたは、メディア戦略のヒアリング担当です。ユーザーが書いた「今後の方針」を、記事テーマの設計に使えるほど具体的にするために、追加で確認すべき質問を、ちょうど3つ作ってください。
+観点は、対象読者／目指す成果（読者や事業がどうなればよいか）／扱う範囲（現在のテーマとの関係、活かしたい強み、扱わない領域）です。方針の文章で、すでに書かれている観点は避け、足りない点を優先してください。
+質問は、1文で短く、専門用語を使いすぎないこと。hint には、回答の書き方の例を1つ書いてください。結果はJSONで返してください。
+フォーマット: {"questions":[{"question":"","hint":""}]}`,
+    user: `方針の種類: ${INTENT_MODES[mode]}\n今後の方針: ${text}\n${current}`,
+    label: 'direction-questions',
+    simulate: () => ({ questions: FALLBACK_QUESTIONS }),
+  });
+  let qs = (Array.isArray(data.questions) ? data.questions : []).slice(0, 3)
+    .map((q) => ({ question: clip(q && q.question, 200), hint: clip(q && q.hint, 200) })).filter((q) => q.question);
+  for (const f of FALLBACK_QUESTIONS) if (qs.length < 3 && !qs.some((q) => q.question === f.question)) qs.push(f);
+  res.json({ questions: qs, mode: aiMode });
+});
+
 app.post('/api/media/direction', async (req, res) => {
   const m = getMediaProfile(req, res);
   if (!m) return;
 
-  const system = 'あなたはSEO戦略コンサルタントです。与えられた情報から、このメディアが扱うべきテーマ領域（TopicCluster）を3〜5個、優先度・カバレッジ状況とともにJSONで提案してください。フォーマット: {"clusters":[{"name":"","priority":"高|中|低","coverage":"未着手|一部|十分","reason":""}]}';
+  // 方針は、この呼び出しで渡されたものを保存して使う（渡されなければ、前回の方針をそのまま使う）
+  if (req.body && 'intent' in req.body) {
+    m.intent = m.mediaState === 'existing' ? cleanIntent(req.body.intent) : null;
+    persistReg(req, m, { intent: m.intent });
+  }
+  const intent = m.mediaState === 'existing' ? m.intent : null;
+
+  const system = `あなたはSEO・コンテンツ戦略コンサルタントです。与えられた情報から、このメディアが扱うべきテーマ領域（TopicCluster）を3〜6個、優先度・カバレッジ状況とともにJSONで提案してください。
+フォーマット: {"clusters":[{"name":"","priority":"高|中|低","coverage":"未着手|一部|十分","reason":"","change":"継続|縮小|新規","basis":"実績|方針|両方","hypothesis":true|false,"existingAdvice":""}]}
+- 「今後の方針」が与えられていない場合：実績だけから設計し、change は「継続」、basis は「実績」、hypothesis は false にしてください。
+- 「今後の方針」が与えられている場合：実績より方針を優先して設計してください。実績は「現状」として扱います。現状のテーマのうち、方針に合うものは change=「継続」、方針に合わないものや優先度を下げるものは「縮小」、方針から生まれる新しい領域は「新規」にします。方針の種類が「大きく方向転換する」のときは、現状の領域を大きく縮小・整理してかまいません。
+- 実績のデータ（サイトの記事・検索実績）で裏付けられない新しい領域は hypothesis=true とし、reason に「方針のどの部分にもとづくか」と、仮説であることを書いてください。裏付けがある領域は false です。basis は、根拠が実績なら「実績」、方針なら「方針」、両方なら「両方」です。
+- existingAdvice には、既存の記事を、その領域に向けてリライトで寄せる／そのまま残す／整理する、のどれが合うかを1文で書いてください（なければ空文字）。
+- 方針に書かれていない事実（数値・制度など）を作らないでください。`;
   const user = m.mediaState === 'existing'
-    ? `既存メディアの分析結果: ${JSON.stringify(m.existingAnalysis)}${existingTitlesText(m)}`
+    ? `既存メディアの分析結果: ${JSON.stringify(m.existingAnalysis)}${existingTitlesText(m)}${intent ? `\n\n${intentText(intent)}` : ''}`
     : `業種: ${m.businessInfo?.industry}\n商圏: ${m.businessInfo?.area}\n事業理解ヒアリング: ${m.hearing.history.map((h) => `Q:${h.question} A:${h.answer}`).join(' / ')}`;
 
   const { data, mode } = await getStructured({
@@ -612,11 +698,25 @@ app.post('/api/media/direction', async (req, res) => {
     simulate: () => ({ clusters: DIRECTION_SIMULATION[m.mediaState] }),
   });
 
-  m.topicClusters = data.clusters;
+  const clusters = cleanClusters(data.clusters);
+  if (!clusters.length) return res.status(502).json({ error: '方向性を作成できませんでした。もう一度お試しください' });
+  m.topicClusters = clusters;
   m.directionConfirmed = false;
-  persistReg(req, m, { direction: { clusters: data.clusters, confirmed: false, savedAt: new Date().toISOString() } });
+  persistReg(req, m, { direction: { clusters, confirmed: false, savedAt: new Date().toISOString() } });
   m.themes = null; // 方向性が変わったらテーマ候補は再生成する
-  res.json({ clusters: data.clusters, topCluster: topClusterOf(data.clusters), mode });
+  res.json({ clusters, topCluster: topClusterOf(clusters), mode, intent: intent ? { mode: intent.mode, text: intent.text } : null });
+});
+
+// 画面での手直し（追加・削除・名前や優先度の変更）を保存する
+app.post('/api/media/direction/save', (req, res) => {
+  const m = getMediaProfile(req, res);
+  if (!m) return;
+  const clusters = cleanClusters(req.body?.clusters); // 追加した領域は、画面側で basis=手動 を付けて送る
+  if (!clusters.length) return res.status(400).json({ error: 'テーマ領域は、1つ以上必要です' });
+  m.topicClusters = clusters;
+  m.themes = null;
+  persistReg(req, m, { direction: { clusters, confirmed: !!m.directionConfirmed, savedAt: new Date().toISOString() } });
+  res.json({ clusters, topCluster: topClusterOf(clusters) });
 });
 
 app.post('/api/media/confirm-direction', (req, res) => {
@@ -636,6 +736,7 @@ app.get('/api/media/direction-state', (req, res) => {
     topCluster: m.topicClusters ? topClusterOf(m.topicClusters) : null,
     confirmed: !!m.directionConfirmed,
     hasAnalysis: !!m.existingAnalysis,
+    intent: m.intent || null,
   });
 });
 
@@ -658,7 +759,8 @@ function mediaContextText(m) {
   const parts = [];
   if (m.existingAnalysis?.real) parts.push(`既存メディア: ${m.existingAnalysis.siteUrl}（${m.existingAnalysis.industry}）${m.existingAnalysis.siteSummary}`);
   if (m.businessInfo) parts.push(`業種: ${m.businessInfo.industry} / 商圏: ${m.businessInfo.area}`);
-  if (m.topicClusters) parts.push(`メディアの方向性（テーマ領域）: ${m.topicClusters.map((c) => `${c.name}(優先度${c.priority})`).join('、')}`);
+  if (m.intent) parts.push(intentText(m.intent));
+  if (m.topicClusters) parts.push(`メディアの方向性（テーマ領域）: ${m.topicClusters.map((c) => `${c.name}(優先度${c.priority}${c.change && c.change !== '継続' ? `・${c.change}` : ''})`).join('、')}`);
   if (m.hearing.history.length) parts.push(`事業の強み・実績（事業ヒアリング）: ${m.hearing.history.map((h) => h.answer).join(' / ')}`);
   return parts.join('\n');
 }
