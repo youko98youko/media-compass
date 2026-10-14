@@ -1,8 +1,8 @@
 {
   "name": "media-compass-saas-prototype",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
-  "description": "メディアコンパス極 UX検証用プロトタイプ（本番仕様ではありません）",
+  "description": "メディアコンパス極 UX検証用プロトタイプ v1.00（本番仕様ではありません）",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {

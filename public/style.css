@@ -241,3 +241,5 @@ button{font-family:inherit;}
 .mtab{font-family:inherit; font-size:14px; font-weight:700; color:var(--sub); background:none; border:none; border-bottom:3px solid transparent; margin-bottom:-2px; padding:9px 16px; cursor:pointer;}
 .mtab:hover{color:var(--navy);}
 .mtab.on{color:var(--navy); border-bottom-color:var(--navy);}
+
+.brand .ver{font-size:10.5px; font-weight:600; opacity:.65; margin-left:6px; letter-spacing:.3px;}

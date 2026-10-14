@@ -230,7 +230,7 @@ function shell(innerHtml, { active = true } = {}) {
       </div>`;
   app.innerHTML = `
     <div class="appbar">
-      <span class="brand">メディアコンパス極</span>
+      <span class="brand">メディアコンパス極<span class="ver">v1.00</span></span>
       ${navHtml}
       ${state.user ? `<span class="acct">👤 ${esc(state.user.username)} <a href="#" data-logout>ログアウト</a></span>` : ''}
       <span class="mode-badge ${state.aiEnabled ? 'ai' : 'sim'}"><span class="dot"></span>${state.aiEnabled ? 'AI連携中（ChatGPT）' : 'シミュレーションモード'}</span>
@@ -1305,6 +1305,7 @@ function renderDirectionIntent() {
         <textarea id="di-text" rows="4" maxlength="1000" placeholder="例：今後は、AI検索に引用され、おすすめされるサイトにするためのテーマに移したい。" style="width:100%;font-family:inherit;font-size:14px;padding:9px 11px;border:1px solid var(--line);border-radius:8px;box-sizing:border-box;">${esc(it.text)}</textarea>
         <div style="font-size:11.5px;color:var(--sub);margin-top:6px;">短くてかまいません。書いたあとに、AIが、足りない点を、3つほど質問します。新しい領域（実績がまだない領域）は、方針にもとづく「仮説」として、案に出ます。</div>
       </div>
+      ${state.aiEnabled ? '' : '<div class="missing-box"><div class="h">シミュレーションモードです</div>AIにつながっていないため、質問は定型の3問になり、書いた方針は、設計結果には反映されません（AIに接続した環境で反映されます）。</div>'}
       <div class="btn-row">
         <button class="btn gold" id="di-ask">AIに追加質問してもらう →</button>
         <button class="btn ghost" id="di-go"></button>
