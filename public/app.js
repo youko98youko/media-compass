@@ -48,6 +48,21 @@ const state = {
   rewriteArticle: null, // 元の記事 { wpId, title, url }
 };
 
+// 公開サイトで、秘密の情報（クライアントシークレット・パスワード）を入力する画面の注意書き。
+// ログイン必須の公開版では、「ログインした人だけが使える」ことを伝え、パソコン内（localhost）では何も出さない。
+const isLocalHost = () => ['localhost', '127.0.0.1'].includes(location.hostname);
+const loggedInPublic = () => !isLocalHost() && state.accountsEnabled && !!state.user;
+function secretNoticeHtml(what, verb) {
+  if (isLocalHost()) return '';
+  if (loggedInPublic()) {
+    return `<div class="missing-box" style="margin:8px 0;"><div class="h">この公開サイトは、ログインした人だけが使えます</div>入力した${what}は、暗号化して、あなたのアカウントにだけ保存します（他のアカウントからは見えません）。ただし、無料プランのサーバーでは、保存内容が再起動で消えることがあります。大切なサイトの${verb}は、ご自身のパソコンで動かすプロトタイプ（localhost:3000）で行うことをおすすめします。</div>`;
+  }
+  return `<div class="missing-box" style="margin:8px 0;"><div class="h">このサイトは誰でもアクセスできる公開環境です</div>${what}は秘密の情報です。公開環境での入力はおすすめしません。実際の${verb}は、ご自身のパソコンで動かすプロトタイプ（localhost:3000）で行ってください。</div>`;
+}
+const secretStoreNote = () => (loggedInPublic() || (isLocalHost() && state.accountsEnabled && state.user)
+  ? '暗号化して、あなたのアカウントにだけ保存します（ブラウザには保存しません）'
+  : 'サーバーのメモリ上にだけ保持します（ブラウザには保存せず、サーバーを再起動すると消えます）');
+
 const STEPS = ['テーマ選定', '一次情報', 'AIヒアリング', '記事構成・生成', '装飾・確認', '公開'];
 function stepIndexFor(screen) {
   return { dashboard: -1, themeDetail: 0, primaryInfo: 1, hearing: 2, outline: 3, generating: 3, articleEdit: 4, published: 5 }[screen] ?? -1;
@@ -231,7 +246,7 @@ function shell(innerHtml, { active = true } = {}) {
       </div>`;
   app.innerHTML = `
     <div class="appbar">
-      <span class="brand">メディアコンパス極<span class="ver">v1.01</span></span>
+      <span class="brand">メディアコンパス極<span class="ver">v1.02</span></span>
       ${navHtml}
       ${state.user ? `<span class="acct">👤 ${esc(state.user.username)} <a href="#" data-logout>ログアウト</a></span>` : ''}
       <span class="mode-badge ${state.aiEnabled ? 'ai' : 'sim'}"><span class="dot"></span>${state.aiEnabled ? 'AI連携中（ChatGPT）' : 'シミュレーションモード'}</span>
@@ -627,7 +642,6 @@ async function renderGscConnect() {
   } catch (e) {
     info = { serverConfigured: false, redirectUri: `${location.origin}/api/gsc/callback` };
   }
-  const isLocal = ['localhost', '127.0.0.1'].includes(location.hostname);
   const input = 'width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;box-sizing:border-box;';
 
   const setup = info.serverConfigured ? `
@@ -657,8 +671,8 @@ async function renderGscConnect() {
           <div class="k">クライアントID</div><div class="v"><input id="gsc-client-id" type="text" autocomplete="off" placeholder="1234567890-xxxx.apps.googleusercontent.com" style="${input}"></div>
           <div class="k">クライアントシークレット</div><div class="v"><input id="gsc-client-secret" type="password" autocomplete="off" placeholder="GOCSPX-xxxx" style="${input}"></div>
         </div>
-        <div style="font-size:10.5px;color:var(--sub);margin:8px 0 4px;">※入力した情報は、この連携のためにサーバーのメモリ上にだけ保持します（ブラウザには保存せず、サーバーを再起動すると消えます）。権限は読み取り専用で、サイトの設定やデータは変更しません。</div>
-        ${isLocal ? '' : '<div class="missing-box" style="margin:8px 0;"><div class="h">このサイトは誰でもアクセスできる公開環境です</div>クライアントシークレットは秘密の情報です。公開環境での入力はおすすめしません。実際の連携は、ご自身のパソコンで動かすプロトタイプ（localhost:3000）で行ってください。</div>'}`;
+        <div style="font-size:10.5px;color:var(--sub);margin:8px 0 4px;">※入力した情報は、この連携のために${secretStoreNote()}。権限は読み取り専用で、サイトの設定やデータは変更しません。</div>
+        ${secretNoticeHtml('クライアントシークレット', '連携')}`;
 
   shell(`
     <div class="wrap">
@@ -834,7 +848,6 @@ function handleGscReturn() {
 function renderWordpressConnect() {
   state.screen = 'wordpressConnect';
   const isPublish = state.wpConnectContext === 'publish';
-  const isLocal = ['localhost', '127.0.0.1'].includes(location.hostname);
   const input = 'width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:inherit;box-sizing:border-box;';
   shell(`
     <div class="wrap">
@@ -882,8 +895,8 @@ function renderWordpressConnect() {
           <div class="k">ユーザー名</div><div class="v"><input id="wp-username" type="text" autocomplete="off" placeholder="WordPressのユーザー名" style="${input}"></div>
  <div class="k" id="wp-pw-label">アプリケーションパスワード</div><div class="v"><input id="wp-app-password" type="password" autocomplete="off" placeholder="xxxx xxxx xxxx xxxx xxxx xxxx" style="${input}"></div>
         </div>
-        <div style="font-size:10.5px;color:var(--sub);margin:8px 0 4px;">※入力した情報は、この接続のためにサーバーのメモリ上にだけ保持します（ブラウザには保存せず、サーバーを再起動すると消えます）。一度接続すると、次回からはこの画面は表示されません。</div>
-        ${isLocal ? '' : '<div class="missing-box" style="margin:8px 0;"><div class="h">このサイトは誰でもアクセスできる公開環境です</div>パスワードは秘密の情報です。公開環境での入力はおすすめしません。実際の接続は、ご自身のパソコンで動かすプロトタイプ（localhost:3000）で行ってください。</div>'}
+        <div style="font-size:10.5px;color:var(--sub);margin:8px 0 4px;">※入力した情報は、この接続のために${secretStoreNote()}。一度接続すると、次回からはこの画面は表示されません。</div>
+        ${secretNoticeHtml('パスワード', '接続')}
         <div id="wp-error" style="color:var(--danger);font-size:12.5px;margin:6px 0;"></div>
         <div class="btn-row">
           <button class="btn navy" id="wp-authorize">接続して続ける →</button>

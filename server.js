@@ -843,6 +843,8 @@ reasonsは2〜4個。usablePrimaryInfoIdsは与えられた一次情報のidの�
 }
 
 app.get('/api/themes', async (req, res) => {
+  // ログイン必須の環境で、ログインしていない人には、画面の準備に必要な情報（AI・GSCの有効/無効）だけを返す
+  if (accounts.ENABLED && !req.user) return res.json({ themes: [], themesMode: 'fixed', aiEnabled: AI_ENABLED, gscEnabled: gsc.enabled(), direction: null });
   let themes = fixedThemesFor();
   let themesMode = 'fixed';
   let direction = null;
